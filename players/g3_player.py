@@ -26,6 +26,106 @@ COOL_DOWN = 15
 CB_DURATION = 0  # days dedicated to border consolidation in each cycle
 CB_START = 35    # the day to start the first cycle of border consolidation
 
+class DensityMap:
+
+    def __init__(
+        self,
+        player_id: int,
+        unit_pos: List[List[Tuple[float, float]]],
+        grid_size = 10):
+
+        self.me = player_id
+        self.grid_size = grid_size
+
+        max_dim = 99
+        n_row = n_col = math.ceil(max_dim / grid_size)
+        self.dmap = [[0] * n_col for _ in range(n_row)]
+        self.dmap_ewa = [[-1] * n_col for _ in range(n_row)]
+        self.ndmap = [[-1] * n_col for _ in range(n_row)]
+
+        # create density map
+        def pt2grid(x: float, y: float) -> tuple[int, int]:
+            row_id = math.floor(x / grid_size)
+            col_id = math.floor(y / grid_size)
+
+            return (row_id, col_id)
+
+        for player_id, armies in enumerate(unit_pos):
+            soldier_weight = 1 if player_id != self.me else -1
+            for (x, y) in armies:
+                row, col = pt2grid(x, y)
+                self.dmap[row][col] += soldier_weight
+    
+        # compute exponential weighted average density map 
+        def ewa(dmap, x, y):
+            alpha = 0.9
+            ewa_rho = 0
+
+            n_row, n_col = len(dmap), len(dmap[0])
+            for i in range(n_row):
+                for j in range(n_col):
+                    dist = math.sqrt((x - i) ** 2 + (y - j) ** 2)
+                    ewa_rho += (alpha ** dist) * dmap[i][j]
+            
+            return ewa_rho
+
+        for i in range(n_row):
+            for j in range(n_col):
+                self.dmap_ewa[i][j] = ewa(self.dmap, i, j)
+
+        
+        # compute weighted average of neighboring density
+        def weighted_neighbor_average(dmap, x, y):
+            x_max, y_max = len(dmap) - 1, len(dmap[0]) - 1
+            alpha = 0.9
+            rho_avg = 0
+
+            for neighbor_x in {max(0, x-1), x, min(x_max, x+1)}:
+                for neighbor_y in {max(0, y-1), y, min(y_max, y+1)}:
+                    dist2neighbor = math.sqrt((x-neighbor_x)**2 + (y-neighbor_y)**2)
+                    rho_avg += (alpha ** dist2neighbor) * dmap[neighbor_x][neighbor_y]
+            
+            return rho_avg
+        
+        for i in range(n_row):
+            for j in range(n_col):
+                self.ndmap[i][j] = weighted_neighbor_average(self.dmap, i, j)
+    
+    @property
+    def values(self):
+        return self.dmap
+
+    @property
+    def ewa(self):
+        return self.dmap_ewa
+
+    @property
+    def nvalues(self):
+        return self.ndmap
+
+    def pressure_level(self, pos: Tuple[float, float]) -> int:
+        _x, _y = pos
+        x = math.floor(_x / self.grid_size)
+        y = math.floor(_y / self.grid_size)
+
+        cell_dangerous = self.ndmap[x][y] >= 0
+        neighbor_cell_dangerous = False
+        
+        x_max, y_max = len(self.ndmap) - 1, len(self.ndmap[0]) - 1
+
+        for neighbor_x in {max(0, x-1), x, min(x_max, x+1)}:
+            for neighbor_y in {max(0, y-1), y, min(y_max, y+1)}:
+                if not (neighbor_x == x and neighbor_y == y) and self.ndmap[neighbor_x][neighbor_y] >= 0:
+                    neighbor_cell_dangerous = True
+                    break
+
+        if cell_dangerous:
+            return PRESSURE_HI
+        elif not cell_dangerous and neighbor_cell_dangerous:
+            return PRESSURE_MID
+        else:
+            return PRESSURE_LO
+
 
 class Player:
     def __init__(self, rng: np.random.Generator, logger: logging.Logger, total_days: int, spawn_days: int,
@@ -79,7 +179,7 @@ class Player:
         self.num_scouts = 3
 
         base_angles = get_base_angles(player_idx)
-        outer_wall_angles = np.linspace(start=base_angles[0], stop=base_angles[1], num=(total_days // spawn_days))
+        outer_wall_angles = np.linspace(start=base_angles[0], stop=base_angles[1], num=int(self.initial_radius * 2 / 1.4))
         self.counter = 0
         self.midsorted_outer_wall_angles = midsort(outer_wall_angles)
 
@@ -92,6 +192,20 @@ class Player:
     def get_radius(self, points):
         """Returns the radial distance of our soldier at @point to our homebase."""
         return np.sqrt(((points - self.homebase) ** 2).sum(axis=1))
+
+    def push_v2(self, scout_ids) -> List[Tuple[float, float]]:
+        allies = np.delete(self.our_units, scout_ids, axis=0)  # not using slicing because scout_ids could be non-consecutive
+
+        pressure_levels = [
+            self.dmap.pressure_level(tuple(pos))
+            for pos in allies
+        ]
+        soldier_moves = [
+            self._push_radially(allies[i], plevel=plevel)
+            for i, plevel in enumerate(pressure_levels)
+        ]
+
+        return soldier_moves
 
     def push(self, scout_ids) -> List[Tuple[float, float]]:
         #allies = np.array(shapely_pts_to_tuples(unit_pos[self.us]))
@@ -185,6 +299,21 @@ class Player:
         self.enemy_units = np.concatenate([float_unit_pos[i] for i in range(4) if i != self.us])
         self.our_units = np.array(float_unit_pos[self.us])
 
+        self.debug()
+        self.debug(f'unit_ids: {unit_id[self.us]}')
+        self.debug(f'len(unit_pos): {len(unit_pos[self.us])}, len(unit_ids): {len(unit_id[self.us])}')
+
+        self.dmap = DensityMap(self.us, float_unit_pos)
+        self.debug(f'density map: {np.array(self.dmap.values).T}')
+        # self.debug(f'ewa density: {np.array(dmap.ewa).T}')
+        self.debug(f'average neighbor density: {np.array(self.dmap.nvalues).T}')
+
+        # TODO:
+        # 1. maybe a template system: specify soldier ids, and logic
+        # 2. internally, return ('unit_id', moves), in the end, concatenate all, sort them by unit_id
+        #    and transform them to List[Tuple[float, float]]
+        # 3. things to think about: is it worth the effort to create this system, given what we want to do?
+
         # EARLY GAME: form a 2-layer wall
         if self.day_n <= self.initial_radius:
             self.debug(f'day {self.day_n}: form initial wall')
@@ -209,12 +338,17 @@ class Player:
             scout_ids = np.arange(self.num_scouts)
 
             start = time.time()
-            defense_moves = self.push(scout_ids)
+            defense_moves = self.push_v2(scout_ids)
             self.debug(f'Defense: {time.time()-start}s')
             
             start = time.time()
             offense_moves = self.move_scouts(scout_ids)
             self.debug(f'Offense: {time.time()-start}s')
+
+
+            # TODO
+            # As a first step, modify the function signatures to take in soldiers
+            # merge the returned moves
 
             return offense_moves + defense_moves
 
