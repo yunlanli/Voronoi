@@ -150,6 +150,40 @@ class DensityMap:
         else:
             return PRESSURE_LO
 
+    def suggest_move(self, ally_pos: Tuple[float, float]) -> Tuple[float, float]:
+        """Suggests a direction to move a soldier within a grid cell.
+
+        If a soldier experiences PRESSURE_MID:
+            a) more allies than enemies, soldier attacks intruders in the grid
+            b) less allies than enemies, soldier retreats to be closer than ally
+        
+        We want a greater attraction force to enemies within a grid cell for (a),
+        while we want a greater attraction foce to allyies for (b).
+        """
+
+        grid_id = self.pt2grid(ally_pos[0], ally_pos[1])
+        troops = self.soldier_partitions[grid_id]
+        ally2enemy_ratio = reduce(
+            lambda acc, el: (acc[0] + 1, acc[0]) if el[1] == self.me else (acc[0], acc[1] + 1),
+            troops,
+            (0, 0)
+        )
+
+        enemy_attr_scale, ally_attr_scale = ally2enemy_ratio
+        if enemy_attr_scale > ally_attr_scale:
+            enemy_attr_scale = enemy_attr_scale ** 2
+        else:
+            ally_attr_scale = ally_attr_scale ** 2
+
+        attr_fvec = np.zeros((2,), dtype=float)
+        for other_soldier, pid in troops:
+            attr_scale = ally_attr_scale if pid == self.me else enemy_attr_scale
+            attr_fvec += attr_scale * attractive_force(ally_pos, other_soldier)
+
+        angle = np.arctan2(attr_fvec[0], attr_fvec[1])
+
+        return (1, angle)
+
 
 class Player:
     def __init__(self, rng: np.random.Generator, logger: logging.Logger, total_days: int, spawn_days: int,
@@ -225,6 +259,7 @@ class Player:
         ]
         soldier_moves = [
             self._push_radially(allies[i], plevel=plevel)
+            if plevel != PRESSURE_MID else self.d.suggest_move(allies[i])
             for i, plevel in enumerate(pressure_levels)
         ]
 
@@ -486,6 +521,9 @@ def repelling_force_sum(pts: List[Tuple[float, float]], receiver: Tuple[float, f
 
 def reactive_force(fvec: List[float]) -> List[float]:
     return fvec * (-1.)
+
+def attractive_force(p1: Tuple[float, float], p2: Tuple[float, float]) -> List[float]:
+    return reactive_force(repelling_force(p1, p2))
 
 def get_pressure_level(force: List[float]) -> int:
     p = np.linalg.norm(force)
