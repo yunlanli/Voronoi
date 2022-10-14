@@ -1,8 +1,9 @@
+from functools import reduce
 import logging
 import math
 import os
 import pickle
-from typing import Tuple, List
+from typing import Tuple, List, Dict
 import time
 
 import numpy as np
@@ -34,88 +35,111 @@ class DensityMap:
         unit_pos: List[List[Tuple[float, float]]],
         grid_size = 10):
 
+        max_dim = 99
+
         self.me = player_id
         self.grid_size = grid_size
+        self.dmap_max_dim = math.ceil(max_dim / grid_size)
 
-        max_dim = 99
-        n_row = n_col = math.ceil(max_dim / grid_size)
-        self.dmap = [[0] * n_col for _ in range(n_row)]
-        self.dmap_ewa = [[-1] * n_col for _ in range(n_row)]
-        self.ndmap = [[-1] * n_col for _ in range(n_row)]
+        self.soldier_partitions = self._partition_soldiers(unit_pos)
+        self._dmap = self.__dmap()
+        self._ndmap = self.__ndmap()
 
-        # create density map
-        def pt2grid(x: float, y: float) -> tuple[int, int]:
-            row_id = math.floor(x / grid_size)
-            col_id = math.floor(y / grid_size)
+    def pt2grid(self, x: float, y: float) -> tuple[int, int]:
+        row_id = math.floor(x / self.grid_size)
+        col_id = math.floor(y / self.grid_size)
 
-            return (row_id, col_id)
+        return (row_id, col_id)
 
-        for player_id, armies in enumerate(unit_pos):
-            soldier_weight = 1 if player_id != self.me else -1
-            for (x, y) in armies:
-                row, col = pt2grid(x, y)
-                self.dmap[row][col] += soldier_weight
-    
-        # compute exponential weighted average density map 
-        def ewa(dmap, x, y):
-            alpha = 0.9
-            ewa_rho = 0
-
-            n_row, n_col = len(dmap), len(dmap[0])
-            for i in range(n_row):
-                for j in range(n_col):
-                    dist = math.sqrt((x - i) ** 2 + (y - j) ** 2)
-                    ewa_rho += (alpha ** dist) * dmap[i][j]
-            
-            return ewa_rho
-
-        for i in range(n_row):
-            for j in range(n_col):
-                self.dmap_ewa[i][j] = ewa(self.dmap, i, j)
-
+    def _partition_soldiers(self, unit_pos: List[List[Tuple[float, float]]]) -> Dict:
+        """Partitions soldiers into n x n grids where n = self.grid_size.
         
-        # compute weighted average of neighboring density
-        def weighted_neighbor_average(dmap, x, y):
-            x_max, y_max = len(dmap) - 1, len(dmap[0]) - 1
+        Returns a dictionary whose key is the grid identifier :: Tuple[int, int], and
+        value is the list of soldiers :: Tuple[Tuple[float, float], int], where the
+        first component is position, and the second indicates which player owns it.
+        """
+
+        partitions = dict()
+
+        for player_id, army_locations in enumerate(unit_pos):
+            for loc in army_locations:
+                grid_key = self.pt2grid(loc[0], loc[1])
+                if grid_key not in partitions:
+                    partitions[grid_key] = []
+                
+                partitions[grid_key].append((loc, player_id))
+
+        return partitions
+
+    def __dmap(self) -> np.ndarray:
+        """Computes the danger in each grid using soldier partitions.
+        
+        Let d(g) represents the danger of a grid, it is defined as
+                    d(g) = n - m
+        where n = # of enemeies in the grid
+              m = # of allies in the grid
+        
+        A positive d(g) means we are outnumbered by enemies in grid g.
+        The higher the value, the more outnumbered we are and dangerous.
+        """
+        danger_map = np.zeros((self.dmap_max_dim, self.dmap_max_dim))
+
+        for x in range(self.dmap_max_dim):
+            for y in range(self.dmap_max_dim):
+                danger_map[x, y] = reduce(
+                    lambda acc, el: acc - 1 if el[1] == self.me else acc + 1,
+                    self.soldier_partitions.get((x, y), []),
+                    0
+                )
+        
+        return danger_map
+
+    def __ndmap(self) -> np.ndarray:
+        """Computes holisitc danger value of each grid.
+
+        Let h(g) be the holisitc danger of a grid g, it is defined as
+                h(g) = sum of [ alpha ** dist(g, g') * d(g') ]
+        where d(g') is the danger value of grid g'
+              dist(g, g') is the distance between the center of g and g'
+              alpha is a distance scaling factor of 0.9
+        """
+
+        def holistic_danger(dmap, x, y):
+            x_max = y_max = self.dmap_max_dim - 1
             alpha = 0.9
-            rho_avg = 0
+            val = 0
 
             for neighbor_x in {max(0, x-1), x, min(x_max, x+1)}:
                 for neighbor_y in {max(0, y-1), y, min(y_max, y+1)}:
                     dist2neighbor = math.sqrt((x-neighbor_x)**2 + (y-neighbor_y)**2)
-                    rho_avg += (alpha ** dist2neighbor) * dmap[neighbor_x][neighbor_y]
+                    val += (alpha ** dist2neighbor) * dmap[neighbor_x][neighbor_y]
             
-            return rho_avg
-        
-        for i in range(n_row):
-            for j in range(n_col):
-                self.ndmap[i][j] = weighted_neighbor_average(self.dmap, i, j)
-    
-    @property
-    def values(self):
-        return self.dmap
+            return val
+
+        hg_map = np.zeros((self.dmap_max_dim, self.dmap_max_dim))
+        for x in range(self.dmap_max_dim):
+            for y in range(self.dmap_max_dim):
+                hg_map[x, y] = holistic_danger(self._dmap, x, y)
+
+        return hg_map
 
     @property
-    def ewa(self):
-        return self.dmap_ewa
+    def dmap(self):
+        return self._dmap
 
     @property
-    def nvalues(self):
-        return self.ndmap
+    def ndmap(self):
+        return self._ndmap
 
     def pressure_level(self, pos: Tuple[float, float]) -> int:
-        _x, _y = pos
-        x = math.floor(_x / self.grid_size)
-        y = math.floor(_y / self.grid_size)
-
-        cell_dangerous = self.ndmap[x][y] >= 0
+        x, y = self.pt2grid(pos[0], pos[1])
+        cell_dangerous = self.ndmap[x, y] >= 0
         neighbor_cell_dangerous = False
         
-        x_max, y_max = len(self.ndmap) - 1, len(self.ndmap[0]) - 1
-
+        x_max = y_max = self.dmap_max_dim - 1
         for neighbor_x in {max(0, x-1), x, min(x_max, x+1)}:
             for neighbor_y in {max(0, y-1), y, min(y_max, y+1)}:
-                if not (neighbor_x == x and neighbor_y == y) and self.ndmap[neighbor_x][neighbor_y] >= 0:
+                if not (neighbor_x == x and neighbor_y == y) and self._ndmap[neighbor_x, neighbor_y] >= 0:
                     neighbor_cell_dangerous = True
                     break
 
@@ -185,7 +209,6 @@ class Player:
 
         self.cb_scheduled = np.array([CB_START, CB_START + CB_DURATION])
 
-
     def debug(self, *args):
         self.logger.info(" ".join(str(a) for a in args))
     
@@ -197,41 +220,13 @@ class Player:
         allies = np.delete(self.our_units, scout_ids, axis=0)  # not using slicing because scout_ids could be non-consecutive
 
         pressure_levels = [
-            self.dmap.pressure_level(tuple(pos))
+            self.d.pressure_level(tuple(pos))
             for pos in allies
         ]
         soldier_moves = [
             self._push_radially(allies[i], plevel=plevel)
             for i, plevel in enumerate(pressure_levels)
         ]
-
-        return soldier_moves
-
-    def push(self, scout_ids) -> List[Tuple[float, float]]:
-        #allies = np.array(shapely_pts_to_tuples(unit_pos[self.us]))
-        allies = np.delete(self.our_units, scout_ids, axis=0)  # not using slicing because scout_ids could be non-consecutive
-
-        # enemies = [shapely_pts_to_tuples(troops) for i, troops in enumerate(unit_pos) if i != self.us]
-        # flattened_enemies = np.concatenate((enemies[0], enemies[1], enemies[2]), axis=0)
-        flattened_enemies = self.enemy_units
-
-        k = math.ceil(len(allies) / 4)
-        kmeans = KMeans(n_clusters=k).fit(allies)
-
-        # ally_distances = np.array([self.get_radius(point) for point in kmeans.cluster_centers_])
-        ally_distances = self.get_radius(kmeans.cluster_centers_)
-        kmeans_radius = KMeans(n_clusters=min(3, k)).fit(ally_distances.reshape(-1, 1))
-
-        max_cluster = kmeans_radius.labels_[0]
-
-        #repelling_forces = [repelling_force_sum(flattened_enemies, c) for c in kmeans.cluster_centers_]
-        repelling_forces = [exploration_force(c, flattened_enemies, ally_pts=None) for c in kmeans.cluster_centers_]
-        pressure_levels = np.array([get_pressure_level(force) for force in repelling_forces])
-        pressure_levels[np.array(kmeans_radius.labels_) != max_cluster] = PRESSURE_LO # index where point is not in outer radius
-        soldier_moves = [self._push_radially(allies[i], plevel=pressure_levels[cid]) for i, cid in enumerate(kmeans.labels_)]
-
-        self.debug(f'pressure: {[int(np.linalg.norm(force)) for force in repelling_forces]}')
-        self.debug(f'moves: {soldier_moves}')
 
         return soldier_moves
 
@@ -303,10 +298,9 @@ class Player:
         self.debug(f'unit_ids: {unit_id[self.us]}')
         self.debug(f'len(unit_pos): {len(unit_pos[self.us])}, len(unit_ids): {len(unit_id[self.us])}')
 
-        self.dmap = DensityMap(self.us, float_unit_pos)
-        self.debug(f'density map: {np.array(self.dmap.values).T}')
-        # self.debug(f'ewa density: {np.array(dmap.ewa).T}')
-        self.debug(f'average neighbor density: {np.array(self.dmap.nvalues).T}')
+        self.d = DensityMap(self.us, float_unit_pos)
+        self.debug(f'density map: {self.d.dmap.T}')
+        self.debug(f'average neighbor density: {self.d.ndmap.T}')
 
         # TODO:
         # 1. maybe a template system: specify soldier ids, and logic
@@ -446,20 +440,6 @@ class Player:
 
         return ndarray_to_moves(scout_moves)
 
-
-# -----------------------------------------------------------------------------
-#   Strategies
-# -----------------------------------------------------------------------------
-
-def _push_radially(pt, homebase, exceed_lo=False):
-    if exceed_lo:
-        # stay where we are
-        return (0., 0.)
-
-    towards_x, towards_y = np.array(pt) - np.array(homebase)
-    angle = np.arctan2(towards_y, towards_x)
-    
-    return (1, angle)
 
 # -----------------------------------------------------------------------------
 #   Force (NumPy)
