@@ -46,6 +46,10 @@ class DensityMap:
         self._ndmap = self.__ndmap()
 
     def pt2grid(self, x: float, y: float) -> tuple[int, int]:
+        """Given a location on map, return the grid it is in. The size
+        of a grid could be access from self.grid_size.
+        """
+
         row_id = math.floor(x / self.grid_size)
         col_id = math.floor(y / self.grid_size)
 
@@ -132,6 +136,19 @@ class DensityMap:
         return self._ndmap
 
     def pressure_level(self, pos: Tuple[float, float]) -> int:
+        """Returns the pressure level at @pos based on holistic danger of the
+        grid @pos is in and that of its neighboring grid.
+        
+        A *positive* holistic danger value h(g) means that it's likely that
+        in grid we'll soon be outnumbered, indicating high pressure.
+
+        Let g be the grid one of our soldier at @pos is in, and G' the set of
+        8 immediately neighboring grids (or less if g is on border).
+
+            h(g) >= 0                                 -> PRESSURE_HI
+            h(g) < 0 and h(g') >= 0 for any g' in G   -> PRESSURE_MID
+            otherwise                                 -> PRESSURE_LO
+        """
         x, y = self.pt2grid(pos[0], pos[1])
         cell_dangerous = self.ndmap[x, y] >= 0
         neighbor_cell_dangerous = False
@@ -159,6 +176,16 @@ class DensityMap:
         
         We want a greater attraction force to enemies within a grid cell for (a),
         while we want a greater attraction foce to allyies for (b).
+        
+        To achieve this, we need scale attraction force for enemies *inversely*
+        with its enemy vs ally ratio, i.e.
+          a) more enemies: want ally attract each other more to form groups, so we
+             scale attration force of enemies less than that of allies.
+          b) less enemies: want ally attracted to enemies to attack, so we scale
+             attraction force of enemies larger than that of allies.
+
+        Currently, an somewhat inverse squared ratio of ally2enemy number is used
+        to scale attraction force of allies and enemies. TODO: a better metric for scale.
         """
 
         grid_id = self.pt2grid(ally_pos[0], ally_pos[1])
