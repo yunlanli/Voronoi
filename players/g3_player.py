@@ -164,7 +164,7 @@ class DensityMap:
         grid_id = self.pt2grid(ally_pos[0], ally_pos[1])
         troops = self.soldier_partitions[grid_id]
         ally2enemy_ratio = reduce(
-            lambda acc, el: (acc[0] + 1, acc[0]) if el[1] == self.me else (acc[0], acc[1] + 1),
+            lambda acc, el: (acc[0] + 1, acc[1]) if el[1] == self.me else (acc[0], acc[1] + 1),
             troops,
             (0, 0)
         )
@@ -177,8 +177,9 @@ class DensityMap:
 
         attr_fvec = np.zeros((2,), dtype=float)
         for other_soldier, pid in troops:
-            attr_scale = ally_attr_scale if pid == self.me else enemy_attr_scale
-            attr_fvec += attr_scale * attractive_force(ally_pos, other_soldier)
+            if (other_soldier != ally_pos).all():
+                attr_scale = ally_attr_scale if pid == self.me else enemy_attr_scale
+                attr_fvec += attr_scale * attractive_force(ally_pos, other_soldier)
 
         angle = np.arctan2(attr_fvec[0], attr_fvec[1])
 
