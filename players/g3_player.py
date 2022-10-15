@@ -212,6 +212,150 @@ class DensityMap:
 
         return (1, angle)
 
+class SpecialForce:
+    def __init__(self, logger: logging.Logger, player_id, id, team_size: int, unit_idxs: List[int] = [], unit_pos: np.ndarray = np.array([])):
+        self.player_id = player_id
+        self.id = id
+        self.team_size = team_size
+        self.enemy = None
+        self.logger = logger
+        self.unit_pos_next_step = []
+        if len(unit_idxs) == len(unit_pos):
+            self.unit_idxs = unit_idxs[0:self.team_size]
+            self.unit_pos = unit_pos[0:self.team_size]
+        else:
+            self.logger.info(f"SPECIAL FORCE {self.id}: length of provided unit idxs and unit position list arguments do not match defaulting to intiializing with no units")
+            self.unit_idxs = []
+            self.unit_pos = []
+
+        # is team in the correct formation?
+        self.in_formation = False
+        self.formation = self.__create_formation()
+
+        if len(unit_idxs) > self.team_size:
+            self.logger.info(f"SPECIAL FORCE {self.id}: initialized special force team {self.id} with too many units")
+
+    def add_unit(self, unit_idx: str):
+        if len(self.unit_idxs) >= self.team_size:
+            self.logger.info(f"SPECIAL FORCE {self.id}: cannot add unit {unit_idx} to special force team {self.id}. Too many units")
+            return False
+        
+        self.unit_idxs.append(unit_idx)
+        return True
+
+    def get_unit_idxs(self):
+        return self.unit_idxs
+    
+    def is_team_full(self):
+        return len(self.unit_idxs) >= self.team_size
+
+    def set_target_enemy(self, enemy: List[float]):
+        self.enemy = enemy
+    
+    def __create_formation(self):
+        precomp_formation = [[0, 0]]
+        concentric_circle_points = [[1, 0]] # radius, points
+
+        for i in range(self.team_size - 1):
+            circle_0_radius = concentric_circle_points[0][0]
+            circle_0_point_count = concentric_circle_points[0][1]
+            min_density_circle_idx = 0
+            max_space_between_points = 0
+
+            for circle_idx in range(len(concentric_circle_points)):
+                circle_radius, point_count = concentric_circle_points[circle_idx]
+                
+                circumference = 2 * np.pi * circle_radius
+                if point_count == 0 or point_count == 1:
+                    space_between_points = circumference
+                elif point_count == 2:
+                    space_between_points = 2 * circle_radius
+                else:
+                    angle = (2 * np.pi) / point_count
+                    space_between_points = 2 * circle_radius * np.sin(angle / 2)
+                
+                if space_between_points > max_space_between_points:
+                    max_space_between_points = space_between_points
+                    min_density_circle_idx = circle_idx
+
+            if 1 / len(concentric_circle_points) < max_space_between_points:
+                # add point to min density circle
+                concentric_circle_points[min_density_circle_idx][1] += 1
+            else:
+                # readjust radius and start new inner radius with 3 points
+                inner_radius = 1 / (len(concentric_circle_points) + 1)
+                concentric_circle_points.insert(0, [inner_radius, 1])
+
+                if len(concentric_circle_points) == 2:
+                    concentric_circle_points[1][1] -= 2
+                    concentric_circle_points[0][1] += 2
+                
+                else:
+                    for circle_idx in range(1, min(len(concentric_circle_points), 6)):
+                        concentric_circle_points[0][1] += 1
+                        concentric_circle_points[circle_idx][1] -= 1
+                
+
+                for circle_idx in range(1, len(concentric_circle_points)):
+                    concentric_circle_points[circle_idx][0] = concentric_circle_points[circle_idx - 1][0] + inner_radius
+
+                concentric_circle_points[-1][0] = 1
+        
+        # calculate points for each circle
+        for circle_radius, point_count in concentric_circle_points:
+            for theta in np.linspace(0, 2 * np.pi, point_count + 1)[0:point_count]:
+                precomp_formation.append([circle_radius * np.cos(theta), circle_radius * np.sin(theta)])
+        
+        return precomp_formation
+
+    def __compute_formation_positions_around_centroid(self, centroid: np.ndarray):
+        positions = centroid + self.formation
+        return np.clip(positions, 0, 100)
+
+    def check_in_formation(self):
+        # check if all units in formation
+        if len(self.unit_pos) == 0:
+            return False
+
+        return self.unit_pos == self.__compute_formation_positions_around_centroid(centroid = self.unit_pos[0])
+    
+    def __congregate(self):
+        # we define target_team_centroid as the centroid of the meeting location of all soldiers
+        if not self.is_team_full():
+            # if team not done being built yet, congregate near home base at 1, 1
+            if self.player_id == 0:
+                target_team_centroid = np.array([1, 1])
+            elif self.player_id == 1:
+                target_team_centroid = np.array([1, 99])
+            elif self.player_id == 2:
+                target_team_centroid = np.array([99, 99])
+            else:
+                target_team_centroid = np.array([99, 1])
+        else:
+            target_team_centroid = np.clip(np.average(self.unit_pos - self.formation[0:len(self.unit_pos)], axis = 0), 1, 99)
+        
+        self.unit_pos_next_step = self.__compute_formation_positions_around_centroid(centroid = target_team_centroid)[0: len(self.unit_idxs)]
+
+    def __attack_target_enemy(self):
+        cur_centroid = self.unit_pos[0]
+        unit_vec_towards_enemy = (self.enemy - cur_centroid) / np.linalg.norm(self.enemy / cur_centroid)
+        self.unit_pos_next_step = self.__compute_formation_positions_around_centroid(centroid = cur_centroid + unit_vec_towards_enemy)[0: len(self.unit_idxs)]
+
+    def move(self):
+        if self.in_formation:
+            self.__attack_target_enemy()
+        else:
+            self.__congregate()
+        
+        # returns [ [unit_idx, (distance, angle)], ... ]
+        return zip(self.get_unit_idxs, get_moves(self.unit_pos, self.unit_pos_next_step))
+
+    def update_state(self, unit_pos:  np.ndarray):
+        assert(len(unit_pos) == len(self.unit_idxs))
+        self.unit_pos = unit_pos
+        self.in_formation = self.check_in_formation()
+
+
 
 class Player:
     def __init__(self, rng: np.random.Generator, logger: logging.Logger, total_days: int, spawn_days: int,
@@ -270,6 +414,17 @@ class Player:
         self.midsorted_outer_wall_angles = midsort(outer_wall_angles)
 
         self.cb_scheduled = np.array([CB_START, CB_START + CB_DURATION])
+
+        # compute special forces metadata
+        self.total_lifetime_units = total_days // spawn_days
+        self.units_by_day_50 = 50 // spawn_days
+        self.sf_units = self.total_lifetime_units / 5
+        self.sf_units_per_team = max(self.sf_units // 5, 10)
+        self.sf_units_per_team = min(self.sf_units_per_team, self.sf_units)
+
+        # round down sf_units to nearest multiple of sf_units per team
+        self.sf_units -= self.sf_units % self.sf_units_per_team
+        self.sf_teams = self.sf_units // self.sf_unit_per_team
 
     def debug(self, *args):
         self.logger.info(" ".join(str(a) for a in args))
