@@ -901,6 +901,7 @@ class MacroArmy(Role):
         self.unit_pos = np.array(self.resource.get_positions(self.unit_id))
 
     def move(self) -> List[Tuple[Uid, Upos]]:
+        self.unit_pos = np.array(self.resource.get_positions(self.unit_id))
         if self.move == None:
             border = self.resource.player.get_border()
             selected_border = border[np.random.choice(np.arange(border.shape[0]), size=min(border.shape[0], troops.shape[0]), replace=False)]
