@@ -340,6 +340,17 @@ class DensityMap:
 #   Role Implementations
 # -----------------------------------------------------------------------------
 
+class DefaultSoldier(RoleTemplate):
+    def __init__(self, logger: logging.Logger, player: Player, name: Tid):
+        super().__init__(logger, player, name)
+
+    def select(self):
+        pass
+
+    def move(self) -> List[Tuple[Uid, Upos]]:
+        pass
+
+
 class Scouts(RoleTemplate):
     def __init__(self, logger: logging.Logger, player: Player, name: Tid, size: int):
         super().__init__(logger, player, name)
