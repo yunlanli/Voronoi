@@ -231,14 +231,6 @@ class DensityMap:
         angle = np.arctan2(fvec[1], fvec[0])
         return (1, angle)
 
-        attr_fvec = np.zeros((2,), dtype=float)
-        for other_soldier, pid in troops:
-            if not (other_soldier == ally_pos).all():
-                attr_scale = ally_attr_scale if pid == self.me else enemy_attr_scale
-                attr_fvec += attr_scale * attractive_force(ally_pos, other_soldier)
-
-        angle = np.arctan2(attr_fvec[1], attr_fvec[0])
-
 
 class Player:
     def __init__(self, rng: np.random.Generator, logger: logging.Logger, total_days: int, spawn_days: int,
@@ -313,6 +305,9 @@ class Player:
         # round down sf_units to nearest multiple of sf_units per team
         self.sf_units -= self.sf_units % self.sf_units_per_team
         self.sf_teams = self.sf_units // self.sf_units_per_team
+
+        # Temporary - Scout
+        self.scout_team = Scouts(self.logger, self, 'scouts1', 3)
 
     def debug(self, *args):
         self.logger.info(" ".join(str(a) for a in args))
@@ -404,9 +399,6 @@ class Player:
         self.enemy_units = np.concatenate([float_unit_pos[i] for i in range(4) if i != self.us])
         self.our_units = np.array(float_unit_pos[self.us])
 
-        # if self.us == 0:
-        #     np.save(open('border.npy', 'wb'), self.get_border())
-        #     np.save(open('units.npy', 'wb'), self.out_units)
 
         self.debug()
         self.debug(f'unit_ids: {unit_id[self.us]}')
@@ -416,38 +408,6 @@ class Player:
         self.debug(f'density map: {self.d.dmap.T}')
         self.debug(f'average neighbor density: {self.d.ndmap.T}')
 
-        # TODO:
-        # 1. maybe a template system: specify soldier ids, and logic
-        # 2. internally, return ('unit_id', moves), in the end, concatenate all, sort them by unit_id
-        #    and transform them to List[Tuple[float, float]]
-        # 3. things to think about: is it worth the effort to create this system, given what we want to do?
-
-        # SAMPLE SQUAD
-        '''
-        if self.day_n <= 20:
-            self.debug(f'day {self.day_n}: form special forces')
-            special_force_unit_idxs = self.special_forces[0].get_unit_idxs()
-            # print(special_force_unit_idxs)
-            self.special_forces[0].update_state([shapely_pts_to_tuples(unit_pos[self.us])[i] for i in special_force_unit_idxs])
-
-            if not self.special_forces[0].is_team_full():
-                self.special_forces[0].add_unit(unit_idx = self.day_n)
-            
-            special_force_moves = self.special_forces[0].move()
-        
-        else:
-            special_force_moves = self.special_forces[0].move()
-        
-        ret = [(0.0, 0.0) for _ in range(len(unit_pos[self.us]))]
-
-        if special_force_moves != None:
-            for unit_idx, unit_move in special_force_moves:
-                ret[unit_idx] = unit_move
-        else:
-            print("special_force_moves is none")
-        #print(self.special_forces[0].get_unit_idxs())
-        print(ret)
-        return ret'''
         # EARLY GAME: form a 2-layer wall
         if self.day_n <= self.initial_radius:
             self.debug(f'day {self.day_n}: form initial wall')
@@ -464,28 +424,26 @@ class Player:
             if self.day_n == self.cb_scheduled[1] - 1:
                 self.cb_scheduled += (COOL_DOWN + CB_DURATION)
 
-            scout_ids = self.select_scouts()
+            self.scout_team.select()
+            scout_ids = self.scout_team.unit_idx  # TODO: change later
+
             defense_moves = self.send_to_border(scout_ids)
-            offense_moves = self.move_scouts(scout_ids)
+            offense_moves = self.scout_team.move()
 
         else:
             # MID_GAME: adjust formation based on opponents' positions
             self.debug(f'day {self.day_n}: cool down')
 
-            scout_ids = self.select_scouts() # IMPORTANT: must be sorted so that we can map them back later
+            self.scout_team.select()
+            scout_ids = self.scout_team.unit_idx  # TODO: change later
 
             start = time.time()
             defense_moves = self.push_v2(scout_ids)
             self.debug(f'Defense: {time.time()-start}s')
             
             start = time.time()
-            offense_moves = self.move_scouts(scout_ids)
+            offense_moves = self.scout_team.move()
             self.debug(f'Offense: {time.time()-start}s')
-
-
-            # TODO
-            # As a first step, modify the function signatures to take in soldiers
-            # merge the returned moves
 
         # insert scout moves into all moves
         all_moves = defense_moves
@@ -499,18 +457,6 @@ class Player:
         x = self.homebase[0] + dist * math.cos(angle)
         y = self.homebase[1] + dist * math.sin(angle)
         return (x, y)
-
-    def select_scouts(self):
-        """
-        Dynamically select scouts based on distance from homebase.
-        But we want them evenly spread out, so I changed it back to original until I figure out how to do it
-        """
-        # n = min(self.our_units.shape[0]//2, self.num_scouts)
-        # dist = ((self.homebase - self.our_units) ** 2).sum(axis=1)
-        # candidate_ids = np.argpartition(dist, -n*2)[-n*2:]
-        # scout_ids = np.sort(np.random.choice(candidate_ids, size=n, replace=False))
-        scout_ids = np.arange(min(self.our_units.shape[0], self.num_scouts))
-        return scout_ids
 
     def get_border(self):
         """Get border of our territory"""
@@ -559,46 +505,6 @@ class Player:
             [pt[0], max(pt[1]-1, 0)]])
         return any(self.map_states[neighbors[:, 0], neighbors[:, 1]] != self.us)
 
-    def _explore(self, scout_unit, enemy_clusters, ally_clusters):
-        homebase_force = inverse_force((scout_unit - self.homebase).reshape(1, 2))
-        force = exploration_force(scout_unit, enemy_clusters, ally_pts=ally_clusters) \
-            + SCOUT_BORDER_SCALE * border_repulsion(scout_unit, xmax=self.map_states.shape[0], ymax=self.map_states.shape[1]) \
-            + SCOUT_HOMEBASE_SCALE * homebase_force \
-            + SCOUT_ENEMY_BASE_SCALE * enemy_base_attraction(scout_unit, self.enemy_bases)
-        return np.array([1, np.arctan2(force[1], force[0])])
-
-    def _get_clusters(self, ally_units):
-        # keep this incase we need it later
-        # enemy_k = min(50, math.ceil(self.enemy_units.shape[0]/2))
-        # enemy_clusters = KMeans(n_clusters=enemy_k).fit(self.enemy_units).cluster_centers_
-        # ally_k = min(15, math.ceil(ally_units.shape[0]/2))
-        # ally_clusters = KMeans(n_clusters=ally_k).fit(ally_units).cluster_centers_
-
-        # change to random selection to speed up
-        enemy_clusters = self.enemy_units[np.random.choice(np.arange(self.enemy_units.shape[0]), min(self.enemy_units.shape[0], 50), replace=False)]
-        ally_clusters = ally_units[np.random.choice(np.arange(ally_units.shape[0]), min(ally_units.shape[0], 15), replace=False)]
-        return enemy_clusters, ally_clusters
-
-    def move_scouts(self, scout_ids):
-        scout_units = self.our_units[scout_ids]
-        scout_moves = np.zeros_like(scout_units, dtype=float)
-        # safety check
-        ally_units = np.delete(self.our_units, scout_ids, axis=0)
-        ally_dist = ((scout_units.reshape(-1, 1, 2) - ally_units.reshape(1, -1, 2)) ** 2).sum(axis=2)
-        min_ally_id = ally_dist.argmin(axis=1)
-        min_enemy_dist = ((scout_units.reshape(-1, 1, 2) - self.enemy_units.reshape(1, -1, 2)) ** 2).sum(axis=2).min(axis=1)
-
-        for i in range(scout_units.shape[0]):
-            if ally_dist[i, min_ally_id[i]] >= min_enemy_dist[i] * 2:
-                # retreat
-                to_x, to_y = ally_units[min_ally_id[i]] - scout_units[i]
-                scout_moves[i] = np.array([1, np.arctan2(to_y, to_x)])
-            else:
-                # explore
-                enemy_clusters, ally_clusters = self._get_clusters(ally_units)
-                scout_moves[i] = self._explore(scout_units[i], enemy_clusters, ally_clusters)
-
-        return ndarray_to_moves(scout_moves)
 
 
 # -----------------------------------------------------------------------------
@@ -863,15 +769,85 @@ class RoleTemplate(Role):
 
 
 class Scouts(RoleTemplate):
-    def __init__(self, logger: logging.Logger, player: Player, name: Tid):
+    def __init__(self, logger: logging.Logger, player: Player, name: Tid, size: int):
         super().__init__(logger, player, name)
 
+        self.target_size = size
+        self.actual_size = 0
+
+        self.unit_idx = []
+        self.unit_pos = []
+
+    def _get_clusters(self, ally_units):
+        enemy_units = self.player.enemy_units
+
+        # change to random selection to speed up
+        enemy_clusters = enemy_units[np.random.choice(np.arange(enemy_units.shape[0]), min(enemy_units.shape[0], 50), replace=False)]
+        ally_clusters = ally_units[np.random.choice(np.arange(self.actual_size), min(self.actual_size, 15), replace=False)]
+
+        return enemy_clusters, ally_clusters
+
+    def _explore(self, scout_unit, enemy_clusters, ally_clusters):
+        # player attributes
+        map_states = self.player.map_states
+        homebase = self.player.homebase
+        enemy_bases = self.player.enemy_bases
+
+        # push and pull factors
+        explore_force = exploration_force(scout_unit, enemy_clusters, ally_pts=ally_clusters)
+        homebase_force = inverse_force((scout_unit - homebase).reshape(1, 2))
+        border_repelling_force = border_repulsion(scout_unit, xmax=map_states.shape[0], ymax=map_states.shape[1])
+        enemy_base_attr = enemy_base_attraction(scout_unit, enemy_bases)
+        
+        # compute aggregate force
+        force = (
+            explore_force                               +
+            border_repelling_force * SCOUT_BORDER_SCALE +
+            homebase_force * SCOUT_HOMEBASE_SCALE       +
+            enemy_base_attr * SCOUT_ENEMY_BASE_SCALE
+        )
+
+        return np.array([1, np.arctan2(force[1], force[0])])
+
     def select(self):
-        print("Scouts.select")
+        """
+        Dynamically select scouts based on distance from homebase.
+        But we want them evenly spread out, so I changed it back to original until I figure out how to do it
+        """
+
+        self._debug("Scouts.select")
+        self.actual_size = min(self.player.our_units.shape[0], self.target_size)
+        self.unit_idx = np.arange(self.actual_size)
+        self.unit_pos = self.player.our_units[self.unit_idx]
 
     def move(self) -> List[Tuple[Uid, Upos]]:
-        print("Scoutns.move")
-        return list()
+
+        self._debug("Scouts.move")
+
+        scout_units = self.unit_pos
+        ally_units = np.delete(self.player.our_units, self.unit_idx, axis=0)
+        enemy_units = self.player.enemy_units
+
+        # compute ally and enemey distances
+        ally_dist = ((scout_units.reshape(-1, 1, 2) - ally_units.reshape(1, -1, 2)) ** 2).sum(axis=2)
+        enemy_dist = ((scout_units.reshape(-1, 1, 2) - enemy_units.reshape(1, -1, 2)) ** 2).sum(axis=2)
+        
+        min_ally_id = ally_dist.argmin(axis=1)
+        min_enemy_dist = enemy_dist.min(axis=1)
+
+        # compute moves for each scout
+        scout_moves = np.zeros_like(scout_units, dtype=float)
+        for i in range(self.actual_size):
+            if ally_dist[i, min_ally_id[i]] >= min_enemy_dist[i] * 2:
+                # retreat
+                to_x, to_y = ally_units[min_ally_id[i]] - scout_units[i]
+                scout_moves[i] = np.array([1, np.arctan2(to_y, to_x)])
+            else:
+                # explore
+                enemy_clusters, ally_clusters = self._get_clusters(ally_units)
+                scout_moves[i] = self._explore(scout_units[i], enemy_clusters, ally_clusters)
+
+        return ndarray_to_moves(scout_moves)
 
 
 class SpecialForce:
