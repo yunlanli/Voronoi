@@ -13,6 +13,10 @@ from sklearn.cluster import KMeans
 import ot
 
 
+# -----------------------------------------------------------------------------
+#   Player Parameters
+# -----------------------------------------------------------------------------
+
 LOG_LEVEL = logging.DEBUG
 
 WALL_DENSITY = 0.1
@@ -28,6 +32,106 @@ SCOUT_ENEMY_BASE_SCALE = 50.0
 COOL_DOWN = 15
 CB_DURATION = 0 # days dedicated to border consolidation in each cycle
 CB_START = 35    # the day to start the first cycle of border consolidation
+
+
+# -----------------------------------------------------------------------------
+#   Custom Types
+# -----------------------------------------------------------------------------
+
+Tid = str
+Uid = int
+Upos = Tuple[float, float]
+
+
+# -----------------------------------------------------------------------------
+#   Role Interface & Template 
+# -----------------------------------------------------------------------------
+
+class Player(ABC):
+    map_states: np.ndarray
+    homebase: np.ndarray
+    enemy_bases: np.ndarray
+    our_units: np.ndarray
+    enemy_units: np.ndarray
+
+    @abstractmethod
+    def play(self):
+        pass
+
+
+class Role(ABC):
+    @abstractmethod
+    def select(self):
+        pass
+
+    @abstractmethod
+    def move(self) -> List[Tuple[Uid, Upos]]:
+        pass
+
+
+class RoleTemplate(Role):
+    _logger: logging.Logger
+    _player: Player
+    _name:   Tid
+
+    def __init__(self, logger: logging.Logger, player: Player, name: Tid):
+        self._player = player
+        self._name = name
+        self._logger = logger
+
+    def _debug(self, *args):
+        self._logger.debug(
+            f"[ {self._name} ] " + " ".join(str(a) for a in args))
+
+    @property
+    def player(self):
+        return self._player
+
+
+# -----------------------------------------------------------------------------
+#   Soldier Allocation, Deallocation, Coordination Framework
+# -----------------------------------------------------------------------------
+
+class ResourcePool:
+    def __init__(self, player: Player):
+        self.player = player
+        self.unit_to_team_dict = {}
+        self.team_to_unit_dict = {}
+    
+    # team_id = 'team''number' i.e. specialforce1
+
+    def get_team_ids(self, team_id: Tid) -> List[Uid]:
+        pass
+
+    def get_team(self, unit_id: Uid) -> Tid:
+        pass
+
+    def is_dead(self, unit_id: Uid) -> bool:
+        pass
+
+    def get_team_casualties(self, team_id: Tid) -> List[Uid]:
+        pass
+
+    def get_free_units(self) -> List[Uid]:
+        pass
+
+    def claim_units(self, team_id: Tid, units: List[Uid]) -> List[Uid]:
+        """Returns list of units unable to be claimed."""
+    
+    def release_units(self, team_id: Tid, units: List[Uid]) -> List[Uid]:
+        """"Returns list of units who weren't successfully fired. They were not on the team in the first place"""
+    
+    def update_state(self):
+
+        pass
+
+    def get_positions(self, units: List[Uid]) -> List[List[float]]:
+        pass
+
+
+# -----------------------------------------------------------------------------
+#   Enemy Pressure Estimator(s)
+# -----------------------------------------------------------------------------
 
 class DensityMap:
 
@@ -231,6 +335,249 @@ class DensityMap:
         angle = np.arctan2(fvec[1], fvec[0])
         return (1, angle)
 
+
+# -----------------------------------------------------------------------------
+#   Role Implementations
+# -----------------------------------------------------------------------------
+
+class Scouts(RoleTemplate):
+    def __init__(self, logger: logging.Logger, player: Player, name: Tid, size: int):
+        super().__init__(logger, player, name)
+
+        self.target_size = size
+        self.actual_size = 0
+
+        self.unit_idx = []
+        self.unit_pos = []
+
+    def _get_clusters(self, ally_units):
+        enemy_units = self.player.enemy_units
+
+        # change to random selection to speed up
+        num_enemies = enemy_units.shape[0]
+        num_allies = ally_units.shape[0]
+
+        enemy_clusters = enemy_units[np.random.choice(np.arange(num_enemies), min(num_enemies, 50), replace=False)]
+        ally_clusters = ally_units[np.random.choice(np.arange(num_allies), min(num_allies, 15), replace=False)]
+
+        return enemy_clusters, ally_clusters
+
+    def _explore(self, scout_unit, enemy_clusters, ally_clusters):
+        # player attributes
+        map_states = self.player.map_states
+        homebase = self.player.homebase
+        enemy_bases = self.player.enemy_bases
+
+        # push and pull factors
+        explore_force = exploration_force(scout_unit, enemy_clusters, ally_pts=ally_clusters)
+        homebase_force = inverse_force((scout_unit - homebase).reshape(1, 2))
+        border_repelling_force = border_repulsion(scout_unit, xmax=map_states.shape[0], ymax=map_states.shape[1])
+        enemy_base_attr = enemy_base_attraction(scout_unit, enemy_bases)
+        
+        # compute aggregate force
+        force = (
+            explore_force                               +
+            border_repelling_force * SCOUT_BORDER_SCALE +
+            homebase_force * SCOUT_HOMEBASE_SCALE       +
+            enemy_base_attr * SCOUT_ENEMY_BASE_SCALE
+        )
+
+        return np.array([1, np.arctan2(force[1], force[0])])
+
+    def select(self):
+        """
+        Dynamically select scouts based on distance from homebase.
+        But we want them evenly spread out, so I changed it back to original until I figure out how to do it
+        """
+
+        self._debug("Scouts.select")
+        self.actual_size = min(self.player.our_units.shape[0], self.target_size)
+        self.unit_idx = np.arange(self.actual_size)
+        self.unit_pos = self.player.our_units[self.unit_idx]
+
+    def move(self) -> List[Tuple[Uid, Upos]]:
+
+        self._debug("Scouts.move")
+
+        scout_units = self.unit_pos
+        ally_units = np.delete(self.player.our_units, self.unit_idx, axis=0)
+        enemy_units = self.player.enemy_units
+
+        # compute ally and enemey distances
+        ally_dist = ((scout_units.reshape(-1, 1, 2) - ally_units.reshape(1, -1, 2)) ** 2).sum(axis=2)
+        enemy_dist = ((scout_units.reshape(-1, 1, 2) - enemy_units.reshape(1, -1, 2)) ** 2).sum(axis=2)
+        
+        min_ally_id = ally_dist.argmin(axis=1)
+        min_enemy_dist = enemy_dist.min(axis=1)
+
+        # compute moves for each scout
+        scout_moves = np.zeros_like(scout_units, dtype=float)
+        for i in range(self.actual_size):
+            if ally_dist[i, min_ally_id[i]] >= min_enemy_dist[i] * 2:
+                # retreat
+                to_x, to_y = ally_units[min_ally_id[i]] - scout_units[i]
+                scout_moves[i] = np.array([1, np.arctan2(to_y, to_x)])
+            else:
+                # explore
+                enemy_clusters, ally_clusters = self._get_clusters(ally_units)
+                scout_moves[i] = self._explore(scout_units[i], enemy_clusters, ally_clusters)
+
+        return ndarray_to_moves(scout_moves)
+
+
+class SpecialForce:
+    def __init__(self, logger: logging.Logger, player_id, id, team_size: int, unit_idxs: List[int] = [], unit_pos: np.ndarray = np.array([])):
+        self.player_id = player_id
+        self.id = id
+        self.team_size = team_size
+        self.enemy = None
+        self.logger = logger
+        self.unit_pos_next_step = []
+        if len(unit_idxs) == len(unit_pos):
+            self.unit_idxs = unit_idxs[0:self.team_size]
+            self.unit_pos = unit_pos[0:self.team_size]
+        else:
+            self.logger.info(f"SPECIAL FORCE {self.id}: length of provided unit idxs and unit position list arguments do not match defaulting to intiializing with no units")
+            self.unit_idxs = []
+            self.unit_pos = []
+
+        # is team in the correct formation?
+        self.in_formation = False
+        self.formation = self.__create_formation()
+
+        if len(unit_idxs) > self.team_size:
+            self.logger.info(f"SPECIAL FORCE {self.id}: initialized special force team {self.id} with too many units")
+
+    def add_unit(self, unit_idx: int):
+        if len(self.unit_idxs) >= self.team_size:
+            self.logger.info(f"SPECIAL FORCE {self.id}: cannot add unit {unit_idx} to special force team {self.id}. Too many units")
+            return False
+        
+        self.unit_idxs.append(unit_idx)
+        print(self.unit_idxs)
+        return True
+
+    def get_unit_idxs(self):
+        return self.unit_idxs
+    
+    def is_team_full(self):
+        return len(self.unit_idxs) >= self.team_size
+
+    def set_target_enemy(self, enemy: List[float]):
+        self.enemy = enemy
+    
+    def __create_formation(self):
+        precomp_formation = [[0, 0]]
+        concentric_circle_points = [[1, 0]] # radius, points
+
+        for i in range(self.team_size - 1):
+            circle_0_radius = concentric_circle_points[0][0]
+            circle_0_point_count = concentric_circle_points[0][1]
+            min_density_circle_idx = 0
+            max_space_between_points = 0
+
+            for circle_idx in range(len(concentric_circle_points)):
+                circle_radius, point_count = concentric_circle_points[circle_idx]
+                
+                circumference = 2 * np.pi * circle_radius
+                if point_count == 0 or point_count == 1:
+                    space_between_points = circumference
+                elif point_count == 2:
+                    space_between_points = 2 * circle_radius
+                else:
+                    angle = (2 * np.pi) / point_count
+                    space_between_points = 2 * circle_radius * np.sin(angle / 2)
+                
+                if space_between_points > max_space_between_points:
+                    max_space_between_points = space_between_points
+                    min_density_circle_idx = circle_idx
+
+            if 1 / len(concentric_circle_points) < max_space_between_points:
+                # add point to min density circle
+                concentric_circle_points[min_density_circle_idx][1] += 1
+            else:
+                # readjust radius and start new inner radius with 3 points
+                inner_radius = 1 / (len(concentric_circle_points) + 1)
+                concentric_circle_points.insert(0, [inner_radius, 1])
+
+                if len(concentric_circle_points) == 2:
+                    concentric_circle_points[1][1] -= 2
+                    concentric_circle_points[0][1] += 2
+                
+                else:
+                    for circle_idx in range(1, min(len(concentric_circle_points), 6)):
+                        concentric_circle_points[0][1] += 1
+                        concentric_circle_points[circle_idx][1] -= 1
+                
+
+                for circle_idx in range(1, len(concentric_circle_points)):
+                    concentric_circle_points[circle_idx][0] = concentric_circle_points[circle_idx - 1][0] + inner_radius
+
+                concentric_circle_points[-1][0] = 1
+        
+        # calculate points for each circle
+        for circle_radius, point_count in concentric_circle_points:
+            for theta in np.linspace(0, 2 * np.pi, point_count + 1)[0:point_count]:
+                precomp_formation.append([circle_radius * np.cos(theta), circle_radius * np.sin(theta)])
+        
+        return np.array(precomp_formation)
+
+    def __compute_formation_positions_around_centroid(self, centroid: np.ndarray):
+        positions = np.add(centroid, self.formation)
+        return np.clip(positions, 0, 100)
+
+    def check_in_formation(self):
+        # check if all units in formation
+        if len(self.unit_pos) == 0:
+            return False
+        # np.array_equal(self.unit_pos, self.__compute_formation_positions_around_centroid(centroid = self.unit_pos[0]))
+        
+        return np.all(np.absolute(np.subtract(self.unit_pos, self.__compute_formation_positions_around_centroid(centroid = self.unit_pos[0])[0: len(self.unit_pos)])) < [0.01, 0.01])
+    
+    def __congregate(self):
+        # we define target_team_centroid as the centroid of the meeting location of all soldiers
+        if not self.is_team_full():
+            # if team not done being built yet, congregate near home base at 1, 1
+            if self.player_id == 0:
+                target_team_centroid = np.array([1, 1])
+            elif self.player_id == 1:
+                target_team_centroid = np.array([1, 99])
+            elif self.player_id == 2:
+                target_team_centroid = np.array([99, 99])
+            else:
+                target_team_centroid = np.array([99, 1])
+        else:
+            target_team_centroid = np.clip(np.average(np.subtract(self.unit_pos, self.formation[0:len(self.unit_pos)]), axis = 0), 1, 99)
+        
+        self.unit_pos_next_step = self.__compute_formation_positions_around_centroid(centroid = target_team_centroid)[0: len(self.unit_idxs)]
+
+    def __attack_target_enemy(self):
+        cur_centroid = np.array(self.unit_pos[0])
+        unit_vec_towards_enemy = (np.subtract(self.enemy, cur_centroid)) / np.linalg.norm(self.enemy / cur_centroid)
+        self.unit_pos_next_step = self.__compute_formation_positions_around_centroid(centroid = cur_centroid + unit_vec_towards_enemy)[0: len(self.unit_idxs)]
+
+    def move(self):
+        if self.in_formation:
+            print("attacking")
+            self.__attack_target_enemy()
+        else:
+            print("congregateing")
+            self.__congregate()
+        
+        if len(self.unit_pos) == 0:
+            return None
+        # returns [ [unit_idx, (distance, angle)], ... ]
+        return zip(self.unit_idxs, get_moves(self.unit_pos, self.unit_pos_next_step[0:len(self.unit_pos)]))
+
+    def update_state(self, unit_pos:  np.ndarray):
+        assert(len(unit_pos) == len(self.unit_idxs))
+        self.unit_pos = unit_pos
+        self.in_formation = self.check_in_formation()
+
+
+# -----------------------------------------------------------------------------
+#   G3 Player
+# -----------------------------------------------------------------------------
 
 class Player:
     def __init__(self, rng: np.random.Generator, logger: logging.Logger, total_days: int, spawn_days: int,
@@ -506,7 +853,6 @@ class Player:
         return any(self.map_states[neighbors[:, 0], neighbors[:, 1]] != self.us)
 
 
-
 # -----------------------------------------------------------------------------
 #   Force (NumPy)
 # -----------------------------------------------------------------------------
@@ -620,16 +966,13 @@ def get_moves(unit_pos, target_loc) -> List[Tuple[float, float]]:
     move_arr = list(zip(move_dist, move_angle))
     return move_arr
 
-
 def shapely_pts_to_tuples(points: List[Point]) -> List[Tuple[float, float]]:
     """Converts a list of shapely.geometry.Point into a list of 2-tuple of floats."""
     return list(map(shapely_pt_to_tuple, points))
 
-
 def shapely_pt_to_tuple(point: Point) -> Tuple[float, float]:
     """Converts a shapely.geometry.Point into a 2-tuple of floats."""
     return ( float(point.x), float(point.y) )
-
 
 def midsort(arr: List[float]) -> List[float]:
     """Sorts an array by repeatedly selecting the midpoints."""
@@ -669,7 +1012,6 @@ def midsort(arr: List[float]) -> List[float]:
 
     return midsorted_arr
 
-
 def get_base_angles(player_idx: int) -> Tuple[float, float]:
     """
     Returns the angles in radians of the two edges around player @player_idx's homebase.
@@ -699,305 +1041,3 @@ def ndarray_to_moves(moves: List[List[float]]) -> List[Tuple[float, float]]:
     Only 2-tuple of floats are accepted as valid actions by the simulator.
     """
     return list(map(tuple, moves))
-
-Tid = str
-Uid = int
-class ResourcePool:
-    def __init__(self, player: Player):
-        self.player = player
-        self.unit_to_team_dict = {}
-        self.team_to_unit_dict = {}
-    
-    # team_id = 'team''number' i.e. specialforce1
-
-    def get_team_ids(self, team_id: Tid) -> List[Uid]:
-        pass
-
-    def get_team(self, unit_id: Uid) -> Tid:
-        pass
-
-    def is_dead(self, unit_id: Uid) -> bool:
-        pass
-
-    def get_team_casualties(self, team_id: Tid) -> List[Uid]:
-        pass
-
-    def get_free_units(self) -> List[Uid]:
-        pass
-
-    def claim_units(self, team_id: Tid, units: List[Uid]) -> List[Uid]:
-        """Returns list of units unable to be claimed."""
-    
-    def release_units(self, team_id: Tid, units: List[Uid]) -> List[Uid]:
-        """"Returns list of units who weren't successfully fired. They were not on the team in the first place"""
-    
-    def update_state(self):
-
-        pass
-
-    def get_positions(self, units: List[Uid]) -> List[List[float]]:
-        pass
-
-
-Upos = Tuple[float, float]
-class Role(ABC):
-    @abstractmethod
-    def select(self):
-        pass
-
-    @abstractmethod
-    def move(self) -> List[Tuple[Uid, Upos]]:
-        pass
-
-class RoleTemplate(Role):
-    _logger: logging.Logger
-    _player: Player
-    _name:   Tid
-
-    def __init__(self, logger: logging.Logger, player: Player, name: Tid):
-        self._player = player
-        self._name = name
-        self._logger = logger
-
-    def _debug(self, *args):
-        self._logger.debug(
-            f"[ {self._name} ] " + " ".join(str(a) for a in args))
-
-    @property
-    def player(self):
-        return self._player
-
-
-class Scouts(RoleTemplate):
-    def __init__(self, logger: logging.Logger, player: Player, name: Tid, size: int):
-        super().__init__(logger, player, name)
-
-        self.target_size = size
-        self.actual_size = 0
-
-        self.unit_idx = []
-        self.unit_pos = []
-
-    def _get_clusters(self, ally_units):
-        enemy_units = self.player.enemy_units
-
-        # change to random selection to speed up
-        num_enemies = enemy_units.shape[0]
-        num_allies = ally_units.shape[0]
-
-        enemy_clusters = enemy_units[np.random.choice(np.arange(num_enemies), min(num_enemies, 50), replace=False)]
-        ally_clusters = ally_units[np.random.choice(np.arange(num_allies), min(num_allies, 15), replace=False)]
-
-        return enemy_clusters, ally_clusters
-
-    def _explore(self, scout_unit, enemy_clusters, ally_clusters):
-        # player attributes
-        map_states = self.player.map_states
-        homebase = self.player.homebase
-        enemy_bases = self.player.enemy_bases
-
-        # push and pull factors
-        explore_force = exploration_force(scout_unit, enemy_clusters, ally_pts=ally_clusters)
-        homebase_force = inverse_force((scout_unit - homebase).reshape(1, 2))
-        border_repelling_force = border_repulsion(scout_unit, xmax=map_states.shape[0], ymax=map_states.shape[1])
-        enemy_base_attr = enemy_base_attraction(scout_unit, enemy_bases)
-        
-        # compute aggregate force
-        force = (
-            explore_force                               +
-            border_repelling_force * SCOUT_BORDER_SCALE +
-            homebase_force * SCOUT_HOMEBASE_SCALE       +
-            enemy_base_attr * SCOUT_ENEMY_BASE_SCALE
-        )
-
-        return np.array([1, np.arctan2(force[1], force[0])])
-
-    def select(self):
-        """
-        Dynamically select scouts based on distance from homebase.
-        But we want them evenly spread out, so I changed it back to original until I figure out how to do it
-        """
-
-        self._debug("Scouts.select")
-        self.actual_size = min(self.player.our_units.shape[0], self.target_size)
-        self.unit_idx = np.arange(self.actual_size)
-        self.unit_pos = self.player.our_units[self.unit_idx]
-
-    def move(self) -> List[Tuple[Uid, Upos]]:
-
-        self._debug("Scouts.move")
-
-        scout_units = self.unit_pos
-        ally_units = np.delete(self.player.our_units, self.unit_idx, axis=0)
-        enemy_units = self.player.enemy_units
-
-        # compute ally and enemey distances
-        ally_dist = ((scout_units.reshape(-1, 1, 2) - ally_units.reshape(1, -1, 2)) ** 2).sum(axis=2)
-        enemy_dist = ((scout_units.reshape(-1, 1, 2) - enemy_units.reshape(1, -1, 2)) ** 2).sum(axis=2)
-        
-        min_ally_id = ally_dist.argmin(axis=1)
-        min_enemy_dist = enemy_dist.min(axis=1)
-
-        # compute moves for each scout
-        scout_moves = np.zeros_like(scout_units, dtype=float)
-        for i in range(self.actual_size):
-            if ally_dist[i, min_ally_id[i]] >= min_enemy_dist[i] * 2:
-                # retreat
-                to_x, to_y = ally_units[min_ally_id[i]] - scout_units[i]
-                scout_moves[i] = np.array([1, np.arctan2(to_y, to_x)])
-            else:
-                # explore
-                enemy_clusters, ally_clusters = self._get_clusters(ally_units)
-                scout_moves[i] = self._explore(scout_units[i], enemy_clusters, ally_clusters)
-
-        return ndarray_to_moves(scout_moves)
-
-
-class SpecialForce:
-    def __init__(self, logger: logging.Logger, player_id, id, team_size: int, unit_idxs: List[int] = [], unit_pos: np.ndarray = np.array([])):
-        self.player_id = player_id
-        self.id = id
-        self.team_size = team_size
-        self.enemy = None
-        self.logger = logger
-        self.unit_pos_next_step = []
-        if len(unit_idxs) == len(unit_pos):
-            self.unit_idxs = unit_idxs[0:self.team_size]
-            self.unit_pos = unit_pos[0:self.team_size]
-        else:
-            self.logger.info(f"SPECIAL FORCE {self.id}: length of provided unit idxs and unit position list arguments do not match defaulting to intiializing with no units")
-            self.unit_idxs = []
-            self.unit_pos = []
-
-        # is team in the correct formation?
-        self.in_formation = False
-        self.formation = self.__create_formation()
-
-        if len(unit_idxs) > self.team_size:
-            self.logger.info(f"SPECIAL FORCE {self.id}: initialized special force team {self.id} with too many units")
-
-    def add_unit(self, unit_idx: int):
-        if len(self.unit_idxs) >= self.team_size:
-            self.logger.info(f"SPECIAL FORCE {self.id}: cannot add unit {unit_idx} to special force team {self.id}. Too many units")
-            return False
-        
-        self.unit_idxs.append(unit_idx)
-        print(self.unit_idxs)
-        return True
-
-    def get_unit_idxs(self):
-        return self.unit_idxs
-    
-    def is_team_full(self):
-        return len(self.unit_idxs) >= self.team_size
-
-    def set_target_enemy(self, enemy: List[float]):
-        self.enemy = enemy
-    
-    def __create_formation(self):
-        precomp_formation = [[0, 0]]
-        concentric_circle_points = [[1, 0]] # radius, points
-
-        for i in range(self.team_size - 1):
-            circle_0_radius = concentric_circle_points[0][0]
-            circle_0_point_count = concentric_circle_points[0][1]
-            min_density_circle_idx = 0
-            max_space_between_points = 0
-
-            for circle_idx in range(len(concentric_circle_points)):
-                circle_radius, point_count = concentric_circle_points[circle_idx]
-                
-                circumference = 2 * np.pi * circle_radius
-                if point_count == 0 or point_count == 1:
-                    space_between_points = circumference
-                elif point_count == 2:
-                    space_between_points = 2 * circle_radius
-                else:
-                    angle = (2 * np.pi) / point_count
-                    space_between_points = 2 * circle_radius * np.sin(angle / 2)
-                
-                if space_between_points > max_space_between_points:
-                    max_space_between_points = space_between_points
-                    min_density_circle_idx = circle_idx
-
-            if 1 / len(concentric_circle_points) < max_space_between_points:
-                # add point to min density circle
-                concentric_circle_points[min_density_circle_idx][1] += 1
-            else:
-                # readjust radius and start new inner radius with 3 points
-                inner_radius = 1 / (len(concentric_circle_points) + 1)
-                concentric_circle_points.insert(0, [inner_radius, 1])
-
-                if len(concentric_circle_points) == 2:
-                    concentric_circle_points[1][1] -= 2
-                    concentric_circle_points[0][1] += 2
-                
-                else:
-                    for circle_idx in range(1, min(len(concentric_circle_points), 6)):
-                        concentric_circle_points[0][1] += 1
-                        concentric_circle_points[circle_idx][1] -= 1
-                
-
-                for circle_idx in range(1, len(concentric_circle_points)):
-                    concentric_circle_points[circle_idx][0] = concentric_circle_points[circle_idx - 1][0] + inner_radius
-
-                concentric_circle_points[-1][0] = 1
-        
-        # calculate points for each circle
-        for circle_radius, point_count in concentric_circle_points:
-            for theta in np.linspace(0, 2 * np.pi, point_count + 1)[0:point_count]:
-                precomp_formation.append([circle_radius * np.cos(theta), circle_radius * np.sin(theta)])
-        
-        return np.array(precomp_formation)
-
-    def __compute_formation_positions_around_centroid(self, centroid: np.ndarray):
-        positions = np.add(centroid, self.formation)
-        return np.clip(positions, 0, 100)
-
-    def check_in_formation(self):
-        # check if all units in formation
-        if len(self.unit_pos) == 0:
-            return False
-        # np.array_equal(self.unit_pos, self.__compute_formation_positions_around_centroid(centroid = self.unit_pos[0]))
-        
-        return np.all(np.absolute(np.subtract(self.unit_pos, self.__compute_formation_positions_around_centroid(centroid = self.unit_pos[0])[0: len(self.unit_pos)])) < [0.01, 0.01])
-    
-    def __congregate(self):
-        # we define target_team_centroid as the centroid of the meeting location of all soldiers
-        if not self.is_team_full():
-            # if team not done being built yet, congregate near home base at 1, 1
-            if self.player_id == 0:
-                target_team_centroid = np.array([1, 1])
-            elif self.player_id == 1:
-                target_team_centroid = np.array([1, 99])
-            elif self.player_id == 2:
-                target_team_centroid = np.array([99, 99])
-            else:
-                target_team_centroid = np.array([99, 1])
-        else:
-            target_team_centroid = np.clip(np.average(np.subtract(self.unit_pos, self.formation[0:len(self.unit_pos)]), axis = 0), 1, 99)
-        
-        self.unit_pos_next_step = self.__compute_formation_positions_around_centroid(centroid = target_team_centroid)[0: len(self.unit_idxs)]
-
-    def __attack_target_enemy(self):
-        cur_centroid = np.array(self.unit_pos[0])
-        unit_vec_towards_enemy = (np.subtract(self.enemy, cur_centroid)) / np.linalg.norm(self.enemy / cur_centroid)
-        self.unit_pos_next_step = self.__compute_formation_positions_around_centroid(centroid = cur_centroid + unit_vec_towards_enemy)[0: len(self.unit_idxs)]
-
-    def move(self):
-        if self.in_formation:
-            print("attacking")
-            self.__attack_target_enemy()
-        else:
-            print("congregateing")
-            self.__congregate()
-        
-        if len(self.unit_pos) == 0:
-            return None
-        # returns [ [unit_idx, (distance, angle)], ... ]
-        return zip(self.unit_idxs, get_moves(self.unit_pos, self.unit_pos_next_step[0:len(self.unit_pos)]))
-
-    def update_state(self, unit_pos:  np.ndarray):
-        assert(len(unit_pos) == len(self.unit_idxs))
-        self.unit_pos = unit_pos
-        self.in_formation = self.check_in_formation()
