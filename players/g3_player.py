@@ -896,8 +896,8 @@ class MacroArmy(Role):
     def select(self):
         # it would be good if get_free_units() returns an array and claim_units() takes input an array
         free_units = np.array(self.resource.get_free_units(), dtype=int) 
-        self.unit_ids = np.random.choice(free_units, size=min(self.MAX_UNITS, free_units.shape[0]), replace=False).tolist()
-        self.resource.claim_units(self.name, self.unit_ids)
+        self.unit_ids = np.random.choice(free_units, size=min(self.MAX_UNITS, free_units.shape[0]), replace=False)
+        self.resource.claim_units(self.name, self.unit_ids.tolist())
 
     def move(self) -> List[Tuple[Uid, Upos]]:
         if self.move == None:
