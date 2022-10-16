@@ -896,7 +896,7 @@ class MacroArmy(Role):
     def select(self):
         # it would be good if get_free_units() returns an array and claim_units() takes input an array
         free_units = np.array(self.resource.get_free_units(), dtype=int) 
-        self.unit_id = np.random.choice(free_units, size=max(self.MAX_UNITS, free_units.shape[0]), replace=False).tolist()
+        self.unit_id = np.random.choice(free_units, size=min(self.MAX_UNITS, free_units.shape[0]), replace=False).tolist()
         self.resource.claim_units(self.name, self.unit_id)
         self.unit_pos = np.array(self.resource.get_positions(self.unit_id))
 
@@ -905,7 +905,7 @@ class MacroArmy(Role):
             border = self.resource.player.get_border()
             selected_border = border[np.random.choice(np.arange(border.shape[0]), size=min(border.shape[0], troops.shape[0]), replace=False)]
             targets = assign_by_ot(troops, selected_border)
-            self.moves = list(zip(self.unit_id), get_moves(troops, targets))
+            self.moves = list(zip(self.unit_id, get_moves(troops, targets)))
         else:
             new_moves = []
             for unit_id, _ in self.moves:
