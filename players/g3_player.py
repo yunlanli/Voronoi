@@ -2,15 +2,12 @@ from abc import ABC, abstractmethod
 from functools import reduce
 import logging
 import math
-import os
-import pickle
 from typing import Tuple, List, Dict
 import time
 
 import numpy as np
-from shapely.geometry import Point
-from sklearn.cluster import KMeans
 import ot
+from shapely.geometry import Point
 
 
 # -----------------------------------------------------------------------------
@@ -660,21 +657,6 @@ class Player:
                 precomp_dir (str): Directory path to store/load pre-computation
         """
 
-        # precomp_path = os.path.join(precomp_dir, "{}.pkl".format(map_path))
-
-        # # precompute check
-        # if os.path.isfile(precomp_path):
-        #     # Getting back the objects:
-        #     with open(precomp_path, "rb") as f:
-        #         self.obj0, self.obj1, self.obj2 = pickle.load(f)
-        # else:
-        #     # Compute objects to store
-        #     self.obj0, self.obj1, self.obj2 = _
-
-        #     # Dump the objects
-        #     with open(precomp_path, 'wb') as f:
-        #         pickle.dump([self.obj0, self.obj1, self.obj2], f)
-
         self.rng = rng
         self.logger = logger
         self.logger.setLevel(LOG_LEVEL)
@@ -722,18 +704,6 @@ class Player:
 
     def debug(self, *args):
         self.logger.info(" ".join(str(a) for a in args))
-    
-    def get_radius(self, points):
-        """Returns the radial distance of our soldier at @point to our homebase."""
-        return np.sqrt(((points - self.homebase) ** 2).sum(axis=1))
-
-    def send_to_border(self, scout_ids) -> List[Tuple[float, float]]:
-        """Sends soldiers to consolidate our bolder."""
-        border = self.get_border()
-        troops = np.delete(self.our_units, scout_ids, axis=0)
-        selected_border = border[np.random.choice(np.arange(border.shape[0]), size=troops.shape[0], replace=False)]
-        targets = assign_by_ot(troops, selected_border)
-        return get_moves(troops, targets)
 
     def play(self, unit_id: List[List[str]], unit_pos: List[List[Point]], map_states: List[List[int]], current_scores: List[int], total_scores: List[int]) -> List[Tuple[float, float]]:
         """Function which based on current game state returns the distance and angle of each unit active on the board
@@ -754,21 +724,18 @@ class Player:
                                                 move each unit of the player
                 """
 
-        self.day_n += 1
-
-        self.map_states = np.array(map_states) - 1
-
         float_unit_pos = [shapely_pts_to_tuples(pts) for pts in unit_pos]
+        self.day_n += 1
+        self.map_states = np.array(map_states) - 1
         self.enemy_offsets = np.array([len(unit_pos[i]) for i in range(4) if i != self.us])
         self.enemy_units = np.concatenate([float_unit_pos[i] for i in range(4) if i != self.us])
         self.our_units = np.array(float_unit_pos[self.us])
+        self.d = DensityMap(self.us, float_unit_pos)
 
 
         self.debug()
         self.debug(f'unit_ids: {unit_id[self.us]}')
         self.debug(f'len(unit_pos): {len(unit_pos[self.us])}, len(unit_ids): {len(unit_id[self.us])}')
-
-        self.d = DensityMap(self.us, float_unit_pos)
         self.debug(f'density map: {self.d.dmap.T}')
         self.debug(f'average neighbor density: {self.d.ndmap.T}')
 
@@ -778,8 +745,10 @@ class Player:
 
             while len(unit_id[self.us]) > len(self.target_loc):
                 # add new target_locations
-                self.target_loc.append(
-                    self.order2coord([self.initial_radius, self.midsorted_outer_wall_angles[len(unit_id[self.us]) - 1]]))
+                self.target_loc.append(order2coord(
+                        self.homebase,
+                        [self.initial_radius, self.midsorted_outer_wall_angles[len(unit_id[self.us]) - 1]]
+                ))
         
             return get_moves(shapely_pts_to_tuples(unit_pos[self.us]), self.target_loc)
         elif self.day_n >= self.cb_scheduled[0] and self.day_n < self.cb_scheduled[1]:
@@ -818,13 +787,6 @@ class Player:
         for i, scout in enumerate(scout_ids.tolist()):
             all_moves = all_moves[:scout] + [offense_moves[i]] + all_moves[scout:]
         return all_moves
-
-    def order2coord(self, order: Tuple[float, float]) -> Tuple[float, float]:
-        """Converts an order, tuple of (dist2homebase, angle), into a coordinate."""
-        dist, angle = order
-        x = self.homebase[0] + dist * math.cos(angle)
-        y = self.homebase[1] + dist * math.sin(angle)
-        return (x, y)
 
     def get_border(self):
         """Get border of our territory"""
@@ -872,6 +834,14 @@ class Player:
             [pt[0], min(pt[1]+1, ymax-1)],
             [pt[0], max(pt[1]-1, 0)]])
         return any(self.map_states[neighbors[:, 0], neighbors[:, 1]] != self.us)
+
+    def send_to_border(self, scout_ids) -> List[Tuple[float, float]]:
+        """Sends soldiers to consolidate our bolder."""
+        border = self.get_border()
+        troops = np.delete(self.our_units, scout_ids, axis=0)
+        selected_border = border[np.random.choice(np.arange(border.shape[0]), size=troops.shape[0], replace=False)]
+        targets = assign_by_ot(troops, selected_border)
+        return get_moves(troops, targets)
 
 
 # -----------------------------------------------------------------------------
@@ -962,6 +932,14 @@ def assign_by_ot(unit_pos, target_loc):
     M = ot.dist(unit_pos, target_loc, metric='euclidean') # cost matrix
     assignment = ot.emd(a, b, M).argmax(axis=1) # OT linear program solver
     return target_loc[assignment]
+
+def order2coord(homebase: np.ndarray, order: Tuple[float, float]) -> Upos:
+    """Converts an order, tuple of (dist2homebase, angle), into a coordinate."""
+    dist, angle = order
+    x = homebase[0] + dist * math.cos(angle)
+    y = homebase[1] + dist * math.sin(angle)
+
+    return (x, y)
 
 def get_moves(unit_pos, target_loc) -> List[Tuple[float, float]]:
     """Returns a list of 2-tuple (dist, angle) required to move a list of points
