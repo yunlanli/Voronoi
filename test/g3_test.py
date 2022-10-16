@@ -21,7 +21,9 @@ from players.g3_player import (
     Role,
     RoleTemplate,
     Scouts,
-    DefaultSoldier
+    DefaultSoldier,
+    MacroArmy,
+    ResourcePool
 )
 
 
@@ -219,6 +221,7 @@ def test_role_instance_impl():
     logger = Logger('test_role_instance_impl')
     homebase = Point(.5, .5)
     player = Player(rng, logger, 50, 3, 0, homebase, 100, 100, '')
+    _resource = ResourcePool(player)
 
     assert issubclass(RoleTemplate, Role), "  FAILED - RoleTempate not a subclass of Role"
     print("  PASSED - RoleTemplate is a subclass of Role")
@@ -230,6 +233,10 @@ def test_role_instance_impl():
     scouts = Scouts(logger, player, 'scouts1', 10)
     assert isinstance(scouts, Role), "  FAILED - scouts :: Scouts not an instance of Role"
     print("  PASSED - scouts :: Scouts is an instance of Role")
+
+    macro_army = MacroArmy(logger, player, 'macroArmy1', _resource)
+    assert isinstance(macro_army, Role), "  FAILED - macro_army :: MacroArmy not an instance of Role"
+    print("  PASSED - macro_army :: MacroArmy is an instance of Role")
 
     print("PASSED - test_role_instance_impl")
 

@@ -82,6 +82,10 @@ class RoleTemplate(Role):
             f"[ {self._name} ] " + " ".join(str(a) for a in args))
 
     @property
+    def name(self):
+        return self._name
+
+    @property
     def player(self):
         return self._player
 
@@ -485,24 +489,16 @@ class Scouts(RoleTemplate):
         return ndarray_to_moves(scout_moves)
 
 
-class MacroArmy(Role):
+class MacroArmy(RoleTemplate):
 
-    def __init__(self, logger, resource, name: Tid):
-        super(MacroArmy, self).__init__()
-        self.name = name
-        self.logger = logger
+    def __init__(self, logger, player, name: Tid, resource: ResourcePool):
+        super().__init__(logger, player, name)
+
         self.resource = resource
         self.unit_ids = None
         self.unit_pos = None
         self.targets = None
         self.MAX_UNITS = 500
-
-    def _debug(self, *args):
-        self._logger.info(" ".join(str(a) for a in args))
-
-    @property
-    def player(self):
-        return self.resource.player
 
     def select(self):
         # it would be good if get_free_units() returns an array and claim_units() takes input an array
@@ -510,7 +506,7 @@ class MacroArmy(Role):
         self.unit_ids = np.random.choice(free_units, size=min(self.MAX_UNITS, free_units.shape[0]), replace=False)
         self.resource.claim_units(self.name, self.unit_ids.tolist())
 
-    def move(self) -> List[Tuple[Uid, Upos]]:
+    def move(self) -> List[Move]:
         if self.move == None:
             # Only calculate border and OT assignments once at creation
             self.unit_pos = np.array(self.resource.get_positions(self.unit_ids))
@@ -845,8 +841,6 @@ class Player:
         targets = assign_by_ot(troops, selected_border)
         return get_moves(troops, targets)
 
-
-
     def get_border(self):
         """Get border of our territory"""
         # trace along x axis to find the starting point
@@ -907,51 +901,11 @@ class Player:
         xmax, ymax = self.map_states.shape
         return (pt[0] in [0, xmax-1] or pt[1] in [0, ymax-1])
 
-    def _explore(self, scout_unit, enemy_clusters, ally_clusters):
-        homebase_force = inverse_force((scout_unit - self.homebase).reshape(1, 2))
-        force = exploration_force(scout_unit, enemy_clusters, ally_pts=ally_clusters) \
-            + SCOUT_BORDER_SCALE * border_repulsion(scout_unit, xmax=self.map_states.shape[0], ymax=self.map_states.shape[1]) \
-            + SCOUT_HOMEBASE_SCALE * homebase_force \
-            + SCOUT_ENEMY_BASE_SCALE * enemy_base_attraction(scout_unit, self.enemy_bases)
-        return np.array([1, np.arctan2(force[1], force[0])])
-
-    def _get_clusters(self, ally_units):
-        # keep this incase we need it later
-        # enemy_k = min(50, math.ceil(self.enemy_units.shape[0]/2))
-        # enemy_clusters = KMeans(n_clusters=enemy_k).fit(self.enemy_units).cluster_centers_
-        # ally_k = min(15, math.ceil(ally_units.shape[0]/2))
-        # ally_clusters = KMeans(n_clusters=ally_k).fit(ally_units).cluster_centers_
-
-        # change to random selection to speed up
-        enemy_clusters = self.enemy_units[np.random.choice(np.arange(self.enemy_units.shape[0]), min(self.enemy_units.shape[0], 50), replace=False)]
-        ally_clusters = ally_units[np.random.choice(np.arange(ally_units.shape[0]), min(ally_units.shape[0], 15), replace=False)]
-        return enemy_clusters, ally_clusters
-
-    def move_scouts(self, scout_ids):
-        scout_units = self.our_units[scout_ids]
-        scout_moves = np.zeros_like(scout_units, dtype=float)
-        # safety check
-        ally_units = np.delete(self.our_units, scout_ids, axis=0)
-        ally_dist = ((scout_units.reshape(-1, 1, 2) - ally_units.reshape(1, -1, 2)) ** 2).sum(axis=2)
-        min_ally_id = ally_dist.argmin(axis=1)
-        min_enemy_dist = ((scout_units.reshape(-1, 1, 2) - self.enemy_units.reshape(1, -1, 2)) ** 2).sum(axis=2).min(axis=1)
-
-        for i in range(scout_units.shape[0]):
-            if ally_dist[i, min_ally_id[i]] >= min_enemy_dist[i] * 2:
-                # retreat
-                to_x, to_y = ally_units[min_ally_id[i]] - scout_units[i]
-                scout_moves[i] = np.array([1, np.arctan2(to_y, to_x)])
-            else:
-                # explore
-                enemy_clusters, ally_clusters = self._get_clusters(ally_units)
-                scout_moves[i] = self._explore(scout_units[i], enemy_clusters, ally_clusters)
-
-        return ndarray_to_moves(scout_moves)
-
 
 # -----------------------------------------------------------------------------
 #   Force (NumPy)
 # -----------------------------------------------------------------------------
+
 def exploration_force(curr_pt, enemy_pts, ally_pts=None):
     if ally_pts is None:
         ally_force = 0
