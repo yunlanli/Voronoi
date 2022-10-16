@@ -881,9 +881,9 @@ class MacroArmy(Role):
         self.name = name
         self.logger = logger
         self.resource = resource
-        self.unit_id = None
+        self.unit_ids = None
         self.unit_pos = None
-        self.moves = None
+        self.targets = None
         self.MAX_UNITS = 500
 
     def _debug(self, *args):
@@ -896,24 +896,27 @@ class MacroArmy(Role):
     def select(self):
         # it would be good if get_free_units() returns an array and claim_units() takes input an array
         free_units = np.array(self.resource.get_free_units(), dtype=int) 
-        self.unit_id = np.random.choice(free_units, size=min(self.MAX_UNITS, free_units.shape[0]), replace=False).tolist()
-        self.resource.claim_units(self.name, self.unit_id)
-        self.unit_pos = np.array(self.resource.get_positions(self.unit_id))
+        self.unit_ids = np.random.choice(free_units, size=min(self.MAX_UNITS, free_units.shape[0]), replace=False).tolist()
+        self.resource.claim_units(self.name, self.unit_ids)
 
     def move(self) -> List[Tuple[Uid, Upos]]:
-        self.unit_pos = np.array(self.resource.get_positions(self.unit_id))
         if self.move == None:
+            # Only calculate border and OT assignments once at creation
+            self.unit_pos = np.array(self.resource.get_positions(self.unit_ids))
             border = self.resource.player.get_border()
             selected_border = border[np.random.choice(np.arange(border.shape[0]), size=min(border.shape[0], troops.shape[0]), replace=False)]
-            targets = assign_by_ot(troops, selected_border)
-            self.moves = list(zip(self.unit_id, get_moves(troops, targets)))
+            self.targets = assign_by_ot(self.unit_pos, selected_border)
         else:
-            new_moves = []
-            for unit_id, _ in self.moves:
-                if not self.resource.is_dead(unit_id):
-                    new_moves.append((unit_id, move))
-            self.moves = new_moves
-        return self.moves
+            # remove dead units without changing assignments for other units
+            dead_units = []
+            for i, unit_id in enumerate(self.unit_ids):
+                if self.resource.is_dead(unit_id):
+                    dead_units.append(i)
+            self.unit_ids = np.delete(self.unit_ids, dead_units, axis=0)
+            self.unit_pos = np.delete(self.unit_pos, dead_units, axis=0)
+            self.targets = np.delete(self.targets, dead_units, axis=0)
+
+        return list(zip(self.unit_id, get_moves(self.unit_pos, self.targets)))
 
 
 class SpecialForce:
