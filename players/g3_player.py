@@ -396,6 +396,7 @@ class Player:
         self.enemy_offsets = np.array([len(unit_pos[i]) for i in range(4) if i != self.us])
         self.enemy_units = np.concatenate([float_unit_pos[i] for i in range(4) if i != self.us])
         self.our_units = np.array(float_unit_pos[self.us])
+        self.our_unit_ids = np.array(unit_id[self.us]).astype(int)
 
         # if self.us == 0:
         #     np.save(open('border.npy', 'wb'), self.get_border())
@@ -880,7 +881,9 @@ class MacroArmy(Role):
         self.name = name
         self.logger = logger
         self.resource = resource
-        self.units = None
+        self.unit_id = None
+        self.unit_pos = None
+        self.moves = None
 
     def _debug(self, *args):
         self._logger.info(" ".join(str(a) for a in args))
@@ -890,10 +893,23 @@ class MacroArmy(Role):
         return self.resource.player
 
     def select(self):
-        pass
+        self.unit_id = self.resource.get_free_units()
+        self.resource.claim_units(self.name, self.unit_id)
+        self.unit_pos = np.array(self.resource.get_positions(self.unit_id))
 
     def move(self) -> List[Tuple[Uid, Upos]]:
-        pass
+        if self.move == None:
+            border = self.resource.player.get_border()
+            selected_border = border[np.random.choice(np.arange(border.shape[0]), size=min(border.shape[0], troops.shape[0]), replace=False)]
+            targets = assign_by_ot(troops, selected_border)
+            self.moves = list(zip(self.unit_id), get_moves(troops, targets))
+        else:
+            new_moves = []
+            for unit_id, _ in self.moves:
+                if not self.resource.is_dead(unit_id):
+                    new_moves.append((unit_id, move))
+            self.moves = new_moves
+        return self.moves
 
 
 class SpecialForce:
