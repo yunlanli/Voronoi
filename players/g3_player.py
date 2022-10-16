@@ -396,7 +396,7 @@ class Player:
         self.enemy_offsets = np.array([len(unit_pos[i]) for i in range(4) if i != self.us])
         self.enemy_units = np.concatenate([float_unit_pos[i] for i in range(4) if i != self.us])
         self.our_units = np.array(float_unit_pos[self.us])
-        self.our_unit_ids = np.array(unit_id[self.us]).astype(int)
+        self.our_unit_ids = np.array(unit_id[self.us], dtype=int)
 
         # if self.us == 0:
         #     np.save(open('border.npy', 'wb'), self.get_border())
@@ -884,6 +884,7 @@ class MacroArmy(Role):
         self.unit_id = None
         self.unit_pos = None
         self.moves = None
+        self.MAX_UNITS = 500
 
     def _debug(self, *args):
         self._logger.info(" ".join(str(a) for a in args))
@@ -893,7 +894,9 @@ class MacroArmy(Role):
         return self.resource.player
 
     def select(self):
-        self.unit_id = self.resource.get_free_units()
+        # it would be good if get_free_units() returns an array and claim_units() takes input an array
+        free_units = np.array(self.resource.get_free_units(), dtype=int) 
+        self.unit_id = np.random.choice(free_units, size=max(self.MAX_UNITS, free_units.shape[0]), replace=False).tolist()
         self.resource.claim_units(self.name, self.unit_id)
         self.unit_pos = np.array(self.resource.get_positions(self.unit_id))
 
