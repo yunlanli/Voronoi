@@ -782,8 +782,11 @@ class Scouts(RoleTemplate):
         enemy_units = self.player.enemy_units
 
         # change to random selection to speed up
-        enemy_clusters = enemy_units[np.random.choice(np.arange(enemy_units.shape[0]), min(enemy_units.shape[0], 50), replace=False)]
-        ally_clusters = ally_units[np.random.choice(np.arange(self.actual_size), min(self.actual_size, 15), replace=False)]
+        num_enemies = enemy_units.shape[0]
+        num_allies = ally_units.shape[0]
+
+        enemy_clusters = enemy_units[np.random.choice(np.arange(num_enemies), min(num_enemies, 50), replace=False)]
+        ally_clusters = ally_units[np.random.choice(np.arange(num_allies), min(num_allies, 15), replace=False)]
 
         return enemy_clusters, ally_clusters
 
