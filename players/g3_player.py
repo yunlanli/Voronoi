@@ -835,20 +835,6 @@ class ResourcePool:
 
 Upos = Tuple[float, float]
 class Role(ABC):
-    _logger: logging.Logger
-
-    def __init__(self, logger, player: Player, name: Tid):
-        self._player = player
-        self._name = name
-        self._logger = logger
-
-    def _debug(self, *args):
-        self._logger.info(" ".join(str(a) for a in args))
-
-    @property
-    def player(self):
-        return self._player
-
     @abstractmethod
     def select(self):
         pass
@@ -856,6 +842,36 @@ class Role(ABC):
     @abstractmethod
     def move(self) -> List[Tuple[Uid, Upos]]:
         pass
+
+class RoleTemplate(Role):
+    _logger: logging.Logger
+    _player: Player
+    _name:   Tid
+
+    def __init__(self, logger: logging.Logger, player: Player, name: Tid):
+        self._player = player
+        self._name = name
+        self._logger = logger
+
+    def _debug(self, *args):
+        self._logger.debug(
+            f"[ {self._name} ] " + " ".join(str(a) for a in args))
+
+    @property
+    def player(self):
+        return self._player
+
+
+class Scouts(RoleTemplate):
+    def __init__(self, logger: logging.Logger, player: Player, name: Tid):
+        super().__init__(logger, player, name)
+
+    def select(self):
+        print("Scouts.select")
+
+    def move(self) -> List[Tuple[Uid, Upos]]:
+        print("Scoutns.move")
+        return list()
 
 
 class SpecialForce:

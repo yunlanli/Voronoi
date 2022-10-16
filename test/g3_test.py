@@ -1,6 +1,8 @@
+from logging import Logger
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+from shapely.geometry import Point
 import sys
 
 project_folder = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -14,7 +16,11 @@ from players.g3_player import (
 	get_moves,
 	repelling_force_sum,
     get_base_angles,
-    DensityMap
+    DensityMap,
+    Player,
+    Role,
+    RoleTemplate,
+    Scouts
 )
 
 
@@ -22,7 +28,7 @@ from players.g3_player import (
 # 	Debug Tests
 # -----------------------------------------------------------------------------
 
-debug = 1
+debug = 0
 
 def debug_densitymap():
     me = 1
@@ -205,6 +211,22 @@ def test_get_base_angles():
         print(f"FAILED with {error_count} errors - test_get_base_angles")
 
 
+def test_role_instance_impl():
+    """Tests if role implementation adheres to the Role ABC."""
+
+    rng = np.random.default_rng()
+    logger = Logger('test_role_instance_impl')
+    homebase = Point(.5, .5)
+    player = Player(rng, logger, 50, 3, 0, homebase, 100, 100, '')
+
+    assert issubclass(RoleTemplate, Role), "  FAILED - RoleTempate not a subclass of Role"
+    print("  PASSED - RoleTemplate is a subclass of Role")
+
+    scouts = Scouts(logger, player, 'scouts1')
+    assert isinstance(scouts, Role), "  FAILED - scouts :: Scouts not an instance of Role"
+    print("  PASSED - scouts :: Scouts is an instance of Role")
+
+
 # -----------------------------------------------------------------------------
 # 	Running Tests...
 # -----------------------------------------------------------------------------
@@ -213,3 +235,5 @@ test_midsort()
 test_get_moves()
 test_repelling_force_sum()
 test_get_base_angles()
+
+test_role_instance_impl()
