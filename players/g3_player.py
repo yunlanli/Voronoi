@@ -41,6 +41,7 @@ CB_START = 35    # the day to start the first cycle of border consolidation
 Tid = str
 Uid = int
 Upos = Tuple[float, float]
+Move = Tuple[Uid, Upos]
 
 
 # -----------------------------------------------------------------------------
@@ -65,7 +66,7 @@ class Role(ABC):
         pass
 
     @abstractmethod
-    def move(self) -> List[Tuple[Uid, Upos]]:
+    def move(self) -> List[Move]:
         pass
 
 
@@ -341,14 +342,65 @@ class DensityMap:
 # -----------------------------------------------------------------------------
 
 class DefaultSoldier(RoleTemplate):
-    def __init__(self, logger: logging.Logger, player: Player, name: Tid):
+    def __init__(self, logger: logging.Logger, player: Player, name: Tid, angles: List[float]):
         super().__init__(logger, player, name)
 
-    def select(self):
-        pass
+        self.counter = 0
+        self.angles = angles
+        self.unit_pos = []
 
-    def move(self) -> List[Tuple[Uid, Upos]]:
-        pass
+    def _move_radially(self, pt: List[float], forward=True) -> Upos:
+        """Moves @pt radially away from homebase, returns a tuple (distance, angle)
+        to move the point.
+        
+        If @pt is at homebase, select an angle from self.midsorted_outer_wall_angles
+        to move in.
+
+        If @forward is True, move away from the homebase. Otherwise, towards the homebase.
+        """
+        homebase = self.player.homebase
+
+        direction = 1 if forward else -1
+        if (pt == homebase).all():
+            angle = self.angles[self.counter % len(self.angles)]
+            self.counter += 1
+        else:
+            towards_x, towards_y = np.array(pt) - np.array(homebase)
+            angle = np.arctan2(towards_y, towards_x)
+        
+        return (direction, angle)
+
+    def _push_radially(self, pt: List[float], plevel=False) -> Upos:
+        """Push, stay or retreat based on the pressure level, returns a tuple
+        (distance, angle) to move the point.
+        """
+        if plevel == PRESSURE_LO:
+            return self._move_radially(pt)
+        elif plevel == PRESSURE_MID:
+            # stay where we are
+            return (0., 0.)
+        else:
+            return self._move_radially(pt, forward=False)
+
+    def select(self):
+        idx_taken = self.player.scout_team.unit_idx  # TODO: change later
+        self.unit_pos = np.delete(self.player.our_units, idx_taken, axis=0)
+
+    def move(self) -> List[Move]:
+        dmap = self.player.d
+        allies = self.unit_pos
+
+        pressure_levels = [
+            dmap.pressure_level(tuple(pos))
+            for pos in allies
+        ]
+        soldier_moves = [
+            self._push_radially(allies[i], plevel=plevel)
+            if plevel != PRESSURE_MID else dmap.suggest_move(allies[i])
+            for i, plevel in enumerate(pressure_levels)
+        ]
+
+        return soldier_moves
 
 
 class Scouts(RoleTemplate):
@@ -406,7 +458,7 @@ class Scouts(RoleTemplate):
         self.unit_idx = np.arange(self.actual_size)
         self.unit_pos = self.player.our_units[self.unit_idx]
 
-    def move(self) -> List[Tuple[Uid, Upos]]:
+    def move(self) -> List[Move]:
 
         self._debug("Scouts.move")
 
@@ -664,8 +716,9 @@ class Player:
         self.sf_units -= self.sf_units % self.sf_units_per_team
         self.sf_teams = self.sf_units // self.sf_units_per_team
 
-        # Temporary - Scout
+        # Temporary - Scout, DefaultSoldier
         self.scout_team = Scouts(self.logger, self, 'scouts1', 3)
+        self.default_soldiers = DefaultSoldier(self.logger, self, 'default1', self.midsorted_outer_wall_angles)
 
     def debug(self, *args):
         self.logger.info(" ".join(str(a) for a in args))
@@ -673,53 +726,6 @@ class Player:
     def get_radius(self, points):
         """Returns the radial distance of our soldier at @point to our homebase."""
         return np.sqrt(((points - self.homebase) ** 2).sum(axis=1))
-
-    def push_v2(self, scout_ids) -> List[Tuple[float, float]]:
-        allies = np.delete(self.our_units, scout_ids, axis=0)  # not using slicing because scout_ids could be non-consecutive
-
-        pressure_levels = [
-            self.d.pressure_level(tuple(pos))
-            for pos in allies
-        ]
-        soldier_moves = [
-            self._push_radially(allies[i], plevel=plevel)
-            if plevel != PRESSURE_MID else self.d.suggest_move(allies[i])
-            for i, plevel in enumerate(pressure_levels)
-        ]
-
-        return soldier_moves
-
-    def _move_radially(self, pt: List[float], forward=True) -> Tuple[float, float]:
-        """Moves @pt radially away from homebase, returns a tuple (distance, angle)
-        to move the point.
-        
-        If @pt is at homebase, select an angle from self.midsorted_outer_wall_angles
-        to move in.
-
-        If @forward is True, move away from the homebase. Otherwise, towards the homebase.
-        """
-        direction = 1 if forward else -1
-
-        if (pt == self.homebase).all():
-            angle = self.midsorted_outer_wall_angles[self.counter % len(self.midsorted_outer_wall_angles)]
-            self.counter += 1
-        else:
-            towards_x, towards_y = np.array(pt) - np.array(self.homebase)
-            angle = np.arctan2(towards_y, towards_x)
-        
-        return (direction, angle)
-
-    def _push_radially(self, pt: List[float], plevel=False) -> Tuple[float, float]:
-        """Push, stay or retreat based on the pressure level, returns a tuple
-        (distance, angle) to move the point.
-        """
-        if plevel == PRESSURE_LO:
-            return self._move_radially(pt)
-        elif plevel == PRESSURE_MID:
-            # stay where we are
-            return (0., 0.)
-        else:
-            return self._move_radially(pt, forward=False)
 
     def send_to_border(self, scout_ids) -> List[Tuple[float, float]]:
         """Sends soldiers to consolidate our bolder."""
@@ -766,7 +772,7 @@ class Player:
         self.debug(f'density map: {self.d.dmap.T}')
         self.debug(f'average neighbor density: {self.d.ndmap.T}')
 
-        # EARLY GAME: form a 2-layer wall
+
         if self.day_n <= self.initial_radius:
             self.debug(f'day {self.day_n}: form initial wall')
 
@@ -782,21 +788,25 @@ class Player:
             if self.day_n == self.cb_scheduled[1] - 1:
                 self.cb_scheduled += (COOL_DOWN + CB_DURATION)
 
+            # allocation phase
             self.scout_team.select()
             scout_ids = self.scout_team.unit_idx  # TODO: change later
 
+            # mobilization phase
             defense_moves = self.send_to_border(scout_ids)
             offense_moves = self.scout_team.move()
-
         else:
             # MID_GAME: adjust formation based on opponents' positions
             self.debug(f'day {self.day_n}: cool down')
 
+            # allocation phase
             self.scout_team.select()
+            self.default_soldiers.select()
             scout_ids = self.scout_team.unit_idx  # TODO: change later
 
+            # mobilization phase
             start = time.time()
-            defense_moves = self.push_v2(scout_ids)
+            defense_moves = self.default_soldiers.move()
             self.debug(f'Defense: {time.time()-start}s')
             
             start = time.time()
