@@ -9,6 +9,8 @@ import numpy as np
 import ot
 from shapely.geometry import Point
 
+from __future__ import annotations
+
 
 # -----------------------------------------------------------------------------
 #   Player Parameters
@@ -93,42 +95,147 @@ class RoleTemplate(Role):
 # -----------------------------------------------------------------------------
 #   Soldier Allocation, Deallocation, Coordination Framework
 # -----------------------------------------------------------------------------
+class State:
+    def __init__(self, unit_id: List[List[str]], unit_pos: List[List[float]], map_states: List[List[int]]):
+        self.unit_id = unit_id
+        self.unit_pos = unit_pos
+        self.map_states = map_states
+
+        self.unit_id_set = set(self.unit_id)
+    
+    def update(self, unit_id: List[List[str]], unit_pos: List[List[float]], map_states: List[List[int]]):
+        self.unit_id = unit_id
+        self.unit_pos = unit_pos
+        self.map_states = map_states
+        self.unit_id_set = set(self.unit_id)
+    
+    def update_using_state(self, state: State):
+        self.update(state.unit_id, state.unit_pos, state.map_states)
+    
+    def new_deaths(self, prev_state: State) -> set:
+        return prev_state.unit_id_set - self.unit_id_set
+    
+    def new_units(self, prev_state: State) -> set:
+        return self.unit_id_set - prev_state.unit_id_set
 
 class ResourcePool:
     def __init__(self, player: Player):
         self.player = player
         self.unit_to_team_dict = {}
         self.team_to_unit_dict = {}
-    
-    # team_id = 'team''number' i.e. specialforce1
+        
+        self.prev_state = State(player.unit_id, player.float_unit_pos, player.map_states)
+        self.cur_state = State(player.unit_id, player.float_unit_pos, player.map_states)
 
+        self.casualties = set()
+        self.free = set()
+
+        self.delta_dict = {}
+    
     def get_team_ids(self, team_id: Tid) -> List[Uid]:
-        pass
+        # team_id = 'team''number' i.e. specialforce1
+        return self.team_to_unit_dict[team_id].tolist()
 
     def get_team(self, unit_id: Uid) -> Tid:
-        pass
+        return self.unit_to_team_dict[unit_id]
 
     def is_dead(self, unit_id: Uid) -> bool:
-        pass
+        return unit_id in self.casualties
 
     def get_team_casualties(self, team_id: Tid) -> List[Uid]:
-        pass
+        if team_id not in self.team_to_unit_dict:
+            print(f"Team {team_id} not found")
+            return False
+        
+        if team_id not in self.delta_dict:
+            return []
+
+        '''casualty_mask = np.in1d(self.unit_to_team_dict[team_id], list(self.casualties))
+        return self.unit_to_team_dict[team_id][casualty_mask]'''
+        return self.delta_dict[team_id].tolist()
+
+        ### change to be for this round specifically
 
     def get_free_units(self) -> List[Uid]:
-        pass
+        return list(self.free)
 
     def claim_units(self, team_id: Tid, units: List[Uid]) -> List[Uid]:
         """Returns list of units unable to be claimed."""
+        claim_set = set(units)
+        successful_claims = claim_set.intersection(self.free)
+        failed_claims = claim_set.difference(successful_claims)
+
+        if team_id not in self.team_to_unit_dict:
+            self.team_to_unit_dict[team_id] = np.array([])
+        
+        self.team_to_unit_dict[team_id] = np.concatenate((self.team_to_unit_dict[team_id], np.array(list(successful_claims))))
+
+        for uid in successful_claims:
+            self.unit_to_team_dict[uid] = team_id
+
+        self.free.difference_update(claim_set)
+
+        return list(failed_claims)
+    
+    def atomically_claim_units(self, team_id: Tid, units: List[Uid]) -> List[Uid]:
+        """Either claims all units or does not claim anything."""
+        claim_set = set(units)
+        failed_claims = claim_set.difference(self.free)
+
+        if len(failed_claims) > 0:
+            return False
+        
+        if len(self.claim_units(team_id, units)) > 0:
+            raise(f'atomic claim resulted in failed claims')
+
+        return True
     
     def release_units(self, team_id: Tid, units: List[Uid]) -> List[Uid]:
         """"Returns list of units who weren't successfully fired. They were not on the team in the first place"""
+        np_units = np.array(units)
+        units_not_on_team = np.setdiff1d(np_units, self.team_to_unit_dict[team_id])
+        self.team_to_unit_dict[team_id] = np.setdiff1d(self.team_to_unit_dict[team_id], np_units)
+
+        return units_not_on_team.tolist()
     
     def update_state(self):
+        self.prev_state.update_using_state(self.cur_state)
+        self.cur_state.update(self.player.unit_id, self.player.float_unit_pos, self.player.map_states)
+        
+        new_deaths = self.cur_state.new_deaths(prev_state=self.prev_state)
+        new_units = self.cur_state.new_units(prev_state=self.prev_state)
+        self.casualties.update(new_deaths)
+        self.free.update(new_units)         # add new units to free
 
-        pass
+        for unit in new_units:
+            self.unit_to_team_dict[unit] = "free"
+        
+        self.delta_dict = {}
+
+        ### remove casualties from free and teams
+        for unit in new_deaths:
+            team = self.unit_to_team_dict[unit]
+            
+            # update deaths this round dictionary (delta_dict)
+            if team not in self.delta_dict:
+                self.delta_dict[team] = np.array([])
+            self.delta_dict[team] = np.concatenate(self.delta_dict[team], np.array([unit]))
+            
+            if team == "free":
+                self.free.remove(unit)
+            else:
+                self.team_to_unit_dict[team] = np.setdiff1d(self.team_to_unit_dict[team], np.array([unit]))
+                
+            self.unit_to_team_dict[unit] = "dead"
+        
+        ## DONE
 
     def get_positions(self, units: List[Uid]) -> List[List[float]]:
-        pass
+        np_units = np.array(units)
+        cur_unit_id = np.array(self.cur_state.unit_id)
+        cur_pos = np.array(self.cur_state.unit_pos)
+        
+        return cur_pos[np.isin(cur_unit_id, np_units)]
 
 
 # -----------------------------------------------------------------------------
@@ -765,14 +872,16 @@ class Player:
                     List[Tuple[float, float]]: Return a list of tuples consisting of distance and angle in radians to
                                                 move each unit of the player
                 """
+        
+        self.unit_id = unit_id
+        self.float_unit_pos = [shapely_pts_to_tuples(pts) for pts in unit_pos]
 
-        float_unit_pos = [shapely_pts_to_tuples(pts) for pts in unit_pos]
         self.day_n += 1
         self.map_states = np.array(map_states) - 1
         self.enemy_offsets = np.array([len(unit_pos[i]) for i in range(4) if i != self.us])
-        self.enemy_units = np.concatenate([float_unit_pos[i] for i in range(4) if i != self.us])
-        self.our_units = np.array(float_unit_pos[self.us])
-        self.d = DensityMap(self.us, float_unit_pos)
+        self.enemy_units = np.concatenate([self.float_unit_pos[i] for i in range(4) if i != self.us])
+        self.our_units = np.array(self.float_unit_pos[self.us])
+        self.d = DensityMap(self.us, self.float_unit_pos)
         self.our_unit_ids = np.array(unit_id[self.us], dtype=int)
 
 
