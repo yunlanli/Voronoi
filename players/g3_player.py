@@ -147,6 +147,9 @@ class ResourcePool:
 
         self.delta_dict = {}
         self.update_state()
+
+    def _debug(self, *args):
+        self.player.debug("[ Resource Pool ] ", args)
     
     def get_team_ids(self, team_id: Tid) -> List[Uid]:
         # team_id = 'team''number' i.e. specialforce1
@@ -166,14 +169,12 @@ class ResourcePool:
 
     def get_team_casualties(self, team_id: Tid) -> List[Uid]:
         if team_id != "free" and team_id not in self.team_to_unit_dict:
-            print(f"Team {team_id} not found")
+            self._debug("get_team_casualties:", f"Team {team_id} not found")
             return []
         
         if team_id not in self.delta_dict:
             return []
 
-        '''casualty_mask = np.in1d(self.unit_to_team_dict[team_id], list(self.casualties))
-        return self.unit_to_team_dict[team_id][casualty_mask]'''
         return self.delta_dict[team_id].tolist()
 
         ### change to be for this round specifically
@@ -225,6 +226,9 @@ class ResourcePool:
         
         for unit in units_on_team:
             self.unit_to_team_dict[unit] = "free"
+
+        # add released units to free list
+        self.free.update(units_on_team)
 
         return units_not_on_team.tolist()
     
@@ -637,7 +641,8 @@ class Scouts(RoleTemplate):
 
         scout_units = self.unit_pos
         ally_units = np.delete(self.player.our_units, self.unit_idx, axis=0)
-        enemy_units = self.player.enemy_units
+        ally_units = np.concatenate([ally_units, self.player.homebase.reshape(1, 2)], axis=0)
+        enemy_units = np.concatenate([self.player.enemy_units, self.player.enemy_bases], axis=0)
 
         # compute ally and enemey distances
         ally_dist = ((scout_units.reshape(-1, 1, 2) - ally_units.reshape(1, -1, 2)) ** 2).sum(axis=2)
@@ -670,6 +675,9 @@ class MacroArmy(RoleTemplate):
         super().__init__(logger, player, name)
 
         self.resource = resource
+        self._initialize_params()
+
+    def _initialize_params(self):
         self.unit_ids = None
         self.unit_pos = None
         self.targets = None
@@ -678,10 +686,19 @@ class MacroArmy(RoleTemplate):
     def select(self):
         # it would be good if get_free_units() returns an array and claim_units() takes input an array
         free_units = np.array(self.resource.get_free_units(), dtype=int) 
-        self.unit_ids = np.random.choice(free_units, size=min(self.MAX_UNITS, free_units.shape[0]), replace=False)
-        self.resource.claim_units(self.name, self.unit_ids.tolist())
+        request_ids = np.random.choice(free_units, size=min(self.MAX_UNITS, free_units.shape[0]), replace=False)
+        unclaimed_ids = self.resource.claim_units(self.name, request_ids.tolist())
+
+        self.unit_ids = np.array(self.resource.get_team_ids(self.name))
+
+        self._debug(f'request   ({len(request_ids)}: {request_ids}')
+        self._debug(f'unclaimed ({len(unclaimed_ids)}: {unclaimed_ids}')
+        self._debug('unit_ids: ', self.unit_ids)
 
     def move(self) -> List[Umove]:
+        if self.unit_ids.shape[0] == 0:
+            return []
+
         if self.targets is None:
             # Only calculate border and OT assignments once at creation
             self.unit_pos = np.array(self.resource.get_positions(self.unit_ids))
@@ -706,8 +723,10 @@ class MacroArmy(RoleTemplate):
         return list(zip(self.unit_ids.tolist(), get_moves(self.unit_pos, self.targets)))
 
     def release(self):
-        self.resource.release_units(self.name, self.unit_ids)
+        units_unreleased = self.resource.release_units(self.name, self.unit_ids)
+        self._debug('units_unreleased:', units_unreleased)
 
+        self._initialize_params()
 
 class SpecialForce:
     def __init__(self, logger: logging.Logger, player_id, id, team_size: int, unit_idxs: List[int] = [], unit_pos: np.ndarray = np.array([])):
@@ -930,11 +949,11 @@ class Player:
         self.sf_teams = self.sf_units // self.sf_units_per_team
 
         # Temporary - Scout, DefaultSoldier
+        self.resource_pool = ResourcePool(self)
+
         self.scout_team = Scouts(self.logger, self, 'scouts1', self.num_scouts)
         self.default_soldiers = DefaultSoldier(self.logger, self, 'default1', self.midsorted_outer_wall_angles)
-        self.macro_army = None
-
-        self.resource_pool = ResourcePool(self)
+        self.macro_army = MacroArmy(self.logger, self, 'macro_army1', self.resource_pool)
 
     def debug(self, *args):
         self.logger.info(" ".join(str(a) for a in args))
@@ -1006,19 +1025,15 @@ class Player:
 
         elif self.day_n >= self.cb_scheduled[0] and self.day_n < self.cb_scheduled[1]:
             self.debug(f'day {self.day_n}: consoldiate border')
-            moves = []
-            
-            self.macro_army = MacroArmy(self.logger, self, 'macro_army', self.resource_pool)
 
-            if self.day_n == self.cb_scheduled[1] - 1:
-                self.cb_scheduled += (self.COOL_DOWN + self.CB_DURATION)
-            
             # allocation phase
             self.scout_team.select()
-            self.macro_army.select()
+            if self.day_n == self.cb_scheduled[0]:
+                self.macro_army.select()
             self.default_soldiers.select()
 
             # mobilization phase
+            moves = []
             moves.extend(self.macro_army.move())
             self.debug(f'Moves after macro: {moves}')
             moves.extend(self.scout_team.move())
@@ -1026,10 +1041,10 @@ class Player:
             moves.extend(self.default_soldiers.move())
             self.debug(f'Moves after default: {moves}')
 
-        else:
-            if not self.macro_army is None:
+            if self.day_n == self.cb_scheduled[1] - 1:
+                self.cb_scheduled += (self.COOL_DOWN + self.CB_DURATION)
                 self.macro_army.release()
-
+        else:
             # MID_GAME: adjust formation based on opponents' positions
             self.debug(f'day {self.day_n}: cool down')
             moves = []
