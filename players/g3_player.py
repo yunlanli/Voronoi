@@ -682,6 +682,7 @@ class MacroArmy(RoleTemplate):
         self.unit_pos = None
         self.targets = None
         self.MAX_UNITS = 500
+        self.MIN_UNITS = 20
 
     def select(self):
         # it would be good if get_free_units() returns an array and claim_units() takes input an array
@@ -690,13 +691,17 @@ class MacroArmy(RoleTemplate):
         unclaimed_ids = self.resource.claim_units(self.name, request_ids.tolist())
 
         self.unit_ids = np.array(self.resource.get_team_ids(self.name))
+        
+        # not worth doing optimal mapping
+        if self.unit_ids.shape[0] < self.MIN_UNITS:
+            self.release()
 
         self._debug(f'request   ({len(request_ids)}: {request_ids}')
         self._debug(f'unclaimed ({len(unclaimed_ids)}: {unclaimed_ids}')
         self._debug('unit_ids: ', self.unit_ids)
 
     def move(self) -> List[Umove]:
-        if self.unit_ids.shape[0] == 0:
+        if self.unit_ids is None or self.unit_ids.shape[0] == 0:
             return []
         if self.targets is None:
             # Only calculate border and OT assignments once at creation
@@ -722,9 +727,9 @@ class MacroArmy(RoleTemplate):
         return list(zip(self.unit_ids.tolist(), get_moves(self.unit_pos, self.targets)))
 
     def release(self):
-        units_unreleased = self.resource.release_units(self.name, self.unit_ids)
+        if not self.unit_ids is None:
+            units_unreleased = self.resource.release_units(self.name, self.unit_ids)
         self._debug('units_unreleased:', units_unreleased)
-
         self._initialize_params()
 
 class SpecialForce(RoleTemplate):
@@ -887,22 +892,22 @@ class SpecialForce(RoleTemplate):
         unit_vec_towards_enemy = (np.subtract(self.enemy, cur_centroid)) / np.linalg.norm(self.enemy / cur_centroid)
         self.unit_pos_next_step = self.__compute_formation_positions_around_centroid(centroid = cur_centroid + unit_vec_towards_enemy)[0: len(self.unit_ids)]
 
-    def move(self):
+    def move(self) -> List[Umove]:
         if len(self.unit_pos) > 0 and (self.in_formation or (self.attacking and self.died_while_attacking <= self.tolerance)):
-            print("attacking")
+            self._debug("attacking")
             self.attacking = True
             self.__attack_target_enemy()
         else:
-            print("congregateing")
+            self._debug("congregateing")
             self.attacking = False
             self.__congregate()
         
         if len(self.unit_pos) == 0:
-            return None
+            return []
         # returns [ [unit_idx, (distance, angle)], ... ]
-        print("special moves: " + str(get_moves(self.unit_pos, self.unit_pos_next_step[0:len(self.unit_pos)])))
-        print(len(get_moves(self.unit_pos, self.unit_pos_next_step[0:len(self.unit_pos)])))
-        return zip(self.unit_ids, get_moves(self.unit_pos, self.unit_pos_next_step[0:len(self.unit_pos)]))
+        self._debug("special moves: " + str(get_moves(self.unit_pos, self.unit_pos_next_step[0:len(self.unit_pos)])))
+        self._debug(len(get_moves(self.unit_pos, self.unit_pos_next_step[0:len(self.unit_pos)])))
+        return list(zip(self.unit_ids, get_moves(self.unit_pos, self.unit_pos_next_step[0:len(self.unit_pos)])))
 
     def release(self):
         pass
@@ -953,7 +958,7 @@ class Player:
         self.target_loc = []
 
         self.initial_radius = 35
-        self.num_scouts = 3
+        self.num_scouts = 1
 
         base_angles = get_base_angles(player_idx)
         outer_wall_angles = np.linspace(start=base_angles[0], stop=base_angles[1], num=int(self.initial_radius * 2 / 1.4))
@@ -985,14 +990,16 @@ class Player:
 
         self.scout_team = Scouts(self.logger, self, 'scouts1', self.num_scouts)
         self.default_soldiers = DefaultSoldier(self.logger, self, 'default1', self.midsorted_outer_wall_angles)
-        self.special_forces = [SpecialForce(self.logger, self, f'specialforce{i}', 13, 5) for i in range(self.sf_count)]
         self.macro_army = MacroArmy(self.logger, self, 'macro_army1', self.resource_pool)
+
+        self.special_forces = [SpecialForce(self.logger, self, f'specialforce{i}', 13, 5) for i in range(self.sf_count)]
+        self.sf_target_ids = [[1,-1] for _ in range(self.sf_count)] #[team, unit_id]
 
     def debug(self, *args):
         self.logger.info(" ".join(str(a) for a in args))
 
     def set_hyperparam(self, spawn_days):
-        self.CB_START = max(35, spawn_days*5)    # the day to start the first cycle of border consolidation
+        self.CB_START = 100000
         self.CB_DURATION = 5 # days dedicated to border consolidation in each cycle
         if spawn_days < 5:
             self.COOL_DOWN = 5
@@ -1038,17 +1045,35 @@ class Player:
         self.resource_pool.update_state()
 
         # compute ally and enemey distances
-        enemy_dist = ((self.enemy_units - self.homebase) ** 2).sum(axis=1)
         for i in range(self.sf_count):
-            min_enemy_cord = self.enemy_units[enemy_dist.argmin()]
-            self.special_forces[i].set_target_enemy(min_enemy_cord)
-            enemy_dist[enemy_dist.argmin()] = 500
+            opponent_id = i
+            if self.us <= i:
+                opponent_id += 1
+            
+            if self.sf_target_ids[i] not in self.unit_id[opponent_id]:
+                # enemy_dist = ((self.enemy_units - self.homebase) ** 2).sum(axis=1)
+                enemy_dist = ((self.float_unit_pos[opponent_id] - self.homebase) ** 2).sum(axis=1)
+                
+                self.sf_target_ids[i] = self.unit_id[opponent_id][enemy_dist.argmin()]
+                '''min_enemy_cord = self.enemy_units[enemy_dist.argmin()]
+                self.special_forces[i].set_target_enemy(min_enemy_cord)
+                enemy_dist[enemy_dist.argmin()] = 500'''
+        
+        for i in range(self.sf_count):
+            opponent_id = i
+            if self.us <= i:
+                opponent_id += 1
+            
+            [idx] = np.where(np.in1d(np.array(self.unit_id[opponent_id]), np.array([self.sf_target_ids[i]])))[0]
+
+            self.special_forces[i].set_target_enemy(self.float_unit_pos[opponent_id][idx])
+
 
         self.debug()
         self.debug(f'unit_ids: {unit_id[self.us]}')
         self.debug(f'len(unit_pos): {len(unit_pos[self.us])}, len(unit_ids): {len(unit_id[self.us])}')
         self.debug(f'density map: {self.d.dmap.T}')
-        self.debug(f'average neighbor density: {self.d.ndmap.T}')
+        # self.debug(f'average neighbor density: {self.d.ndmap.T}')
 
 
         if self.day_n < self.initial_radius:
@@ -1124,16 +1149,33 @@ class Player:
     def get_border(self):
         """Get border of our territory"""
         # trace along x axis to find the starting point
+        pt = None
         if self.us < 2: # 0, 1
             for i in range(100):
                 if self.map_states[i, 99*self.us] != self.us:
                     pt = (i-1, 99*self.us)
                     break
+            if pt is None:
+                for i in range(100):
+                    if self.map_states[0, 99*self.us-i] != self.us:
+                        pt = (0, 99*self.us-i+1)
+                        break
         else: # 2, 3
             for i in range(100):
                 if self.map_states[99-i, 99*(3-self.us)] != self.us:
                     pt = (99-i+1, 99*(3-self.us))
                     break
+            if pt is None:
+                if self.us == 2:
+                    for i in range(100):
+                        if self.map_states[99, 99-i] != self.us:
+                            pt = (99, 99-i+1)
+                            break
+                else:
+                    for i in range(100):
+                        if self.map_states[99, i] != self.us:
+                            pt = (99, i-1)
+                            break
 
         border = set()
         self._trace_border(pt, border)
@@ -1266,7 +1308,7 @@ def assign_by_ot(unit_pos, target_loc):
     Returns reordered target_loc optimally mapped to each unit - shape (N, 2)
     """
     a, b = np.ones((unit_pos.shape[0],)) / unit_pos.shape[0] , np.ones((target_loc.shape[0],)) / target_loc.shape[0]  # uniform weights on points
-    M = ot.dist(unit_pos, target_loc, metric='sqeuclidean') # cost matrix
+    M = ot.dist(unit_pos, target_loc, metric='euclidean') # cost matrix
     assignment = ot.emd(a, b, M).argmax(axis=1) # OT linear program solver
     return target_loc[assignment]
 
