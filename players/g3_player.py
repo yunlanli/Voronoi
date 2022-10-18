@@ -698,7 +698,6 @@ class MacroArmy(RoleTemplate):
     def move(self) -> List[Umove]:
         if self.unit_ids.shape[0] == 0:
             return []
-
         if self.targets is None:
             # Only calculate border and OT assignments once at creation
             self.unit_pos = np.array(self.resource.get_positions(self.unit_ids))
@@ -728,47 +727,72 @@ class MacroArmy(RoleTemplate):
 
         self._initialize_params()
 
-class SpecialForce:
-    def __init__(self, logger: logging.Logger, player_id, id, team_size: int, unit_idxs: List[int] = [], unit_pos: np.ndarray = np.array([])):
-        self.player_id = player_id
-        self.id = id
-        self.team_size = team_size
-        self.enemy = None
-        self.logger = logger
-        self.unit_pos_next_step = []
-        if len(unit_idxs) == len(unit_pos):
-            self.unit_idxs = unit_idxs[0:self.team_size]
-            self.unit_pos = unit_pos[0:self.team_size]
-        else:
-            self.logger.info(f"SPECIAL FORCE {self.id}: length of provided unit idxs and unit position list arguments do not match defaulting to intiializing with no units")
-            self.unit_idxs = []
-            self.unit_pos = []
+class SpecialForce(RoleTemplate):
 
-        # is team in the correct formation?
+    def __init__(self, logger: logging.Logger, player: Player, name: Tid, team_size: int, tolerance: int):
+        self._player = player
+        self._name = name
+        self._logger = logger
+
+        self.team_size = team_size
+        self.actual_size = 0
+
+        self.enemy = None
+        self.unit_pos_next_step = []
+        self.unit_ids = []
+        self.unit_idx = []
+        self.unit_pos = []
+
         self.in_formation = False
         self.formation = self.__create_formation()
 
-        if len(unit_idxs) > self.team_size:
-            self.logger.info(f"SPECIAL FORCE {self.id}: initialized special force team {self.id} with too many units")
+        self.attacking = False
+        self.died_while_attacking = 0
+        self.tolerance = tolerance
 
-    def add_unit(self, unit_idx: int):
-        if len(self.unit_idxs) >= self.team_size:
-            self.logger.info(f"SPECIAL FORCE {self.id}: cannot add unit {unit_idx} to special force team {self.id}. Too many units")
-            return False
+    def select(self):
+        self._debug("SpecialForce.select")
+
+        # update scout team count
+        casualties = len(self.resource_pool.get_team_casualties(self.name))
         
-        self.unit_idxs.append(unit_idx)
-        print(self.unit_idxs)
-        return True
+        self.actual_size -= casualties
+        units_needed = self.team_size - self.actual_size
 
-    def get_unit_idxs(self):
-        return self.unit_idxs
+        if units_needed:
+            units_free = self.resource_pool.get_free_units()
+            units_request = units_free[:min(units_needed, len(units_free))]
+            units_unclaimed = self.resource_pool.claim_units(self.name, units_request)
+
+            self._debug(f'units target: {self.team_size}, actual: {self.actual_size} => need {units_needed} units')
+            self._debug(f'requested {units_request}, unclaimed: {units_unclaimed}')
+
+            # update actual_size
+            self.actual_size += (len(units_request) - len(units_unclaimed))
+
+        self.unit_ids = np.array(self.resource_pool.get_team_ids(self.name))
+        self.unit_pos = np.array(self.resource_pool.get_positions(self.unit_ids))
+        self.unit_idx = np.array(self._get_unit_indices(self.unit_ids))
+
+        self.in_formation = self.check_in_formation()
+
+        if self.attacking and (not self.in_formation):
+            self.died_while_attacking += casualties
+        else:
+            self.died_while_attacking = 0
+
+        self._debug(f'unit_ids: {self.unit_ids}')
+
+
+    def get_unit_ids(self):
+        return self.unit_ids
     
     def is_team_full(self):
-        return len(self.unit_idxs) >= self.team_size
-
-    def set_target_enemy(self, enemy: List[float]):
-        self.enemy = enemy
+        return len(self.unit_ids) >= self.team_size
     
+    def set_target_enemy(self, enemy: Move):
+        self.enemy = enemy
+
     def __create_formation(self):
         precomp_formation = [[0, 0]]
         concentric_circle_points = [[1, 0]] # radius, points
@@ -824,7 +848,7 @@ class SpecialForce:
                 precomp_formation.append([circle_radius * np.cos(theta), circle_radius * np.sin(theta)])
         
         return np.array(precomp_formation)
-
+    
     def __compute_formation_positions_around_centroid(self, centroid: np.ndarray):
         positions = np.add(centroid, self.formation)
         return np.clip(positions, 0, 100)
@@ -837,31 +861,36 @@ class SpecialForce:
         
         return np.all(np.absolute(np.subtract(self.unit_pos, self.__compute_formation_positions_around_centroid(centroid = self.unit_pos[0])[0: len(self.unit_pos)])) < [0.01, 0.01])
     
+    @property
+    def centroid(self):
+        return np.average(np.subtract(self.unit_pos, self.formation[0:len(self.unit_pos)]), axis = 0)
+
     def __congregate(self):
         # we define target_team_centroid as the centroid of the meeting location of all soldiers
         if not self.is_team_full():
             # if team not done being built yet, congregate near home base at 1, 1
-            if self.player_id == 0:
+            if self.player.us == 0:
                 target_team_centroid = np.array([1, 1])
-            elif self.player_id == 1:
+            elif self.player.us == 1:
                 target_team_centroid = np.array([1, 99])
-            elif self.player_id == 2:
+            elif self.player.us == 2:
                 target_team_centroid = np.array([99, 99])
             else:
                 target_team_centroid = np.array([99, 1])
         else:
-            target_team_centroid = np.clip(np.average(np.subtract(self.unit_pos, self.formation[0:len(self.unit_pos)]), axis = 0), 1, 99)
+            target_team_centroid = np.clip(self.centroid, 1, 99)
         
-        self.unit_pos_next_step = self.__compute_formation_positions_around_centroid(centroid = target_team_centroid)[0: len(self.unit_idxs)]
+        self.unit_pos_next_step = self.__compute_formation_positions_around_centroid(centroid = target_team_centroid)[0: len(self.unit_ids)]
 
     def __attack_target_enemy(self):
         cur_centroid = np.array(self.unit_pos[0])
         unit_vec_towards_enemy = (np.subtract(self.enemy, cur_centroid)) / np.linalg.norm(self.enemy / cur_centroid)
-        self.unit_pos_next_step = self.__compute_formation_positions_around_centroid(centroid = cur_centroid + unit_vec_towards_enemy)[0: len(self.unit_idxs)]
+        self.unit_pos_next_step = self.__compute_formation_positions_around_centroid(centroid = cur_centroid + unit_vec_towards_enemy)[0: len(self.unit_ids)]
 
     def move(self):
-        if self.in_formation:
+        if self.in_formation or (self.attacking and self.died_while_attacking <= self.tolerance):
             print("attacking")
+            self.attacking = True
             self.__attack_target_enemy()
         else:
             print("congregateing")
@@ -870,12 +899,12 @@ class SpecialForce:
         if len(self.unit_pos) == 0:
             return None
         # returns [ [unit_idx, (distance, angle)], ... ]
-        return zip(self.unit_idxs, get_moves(self.unit_pos, self.unit_pos_next_step[0:len(self.unit_pos)]))
+        print("special moves: " + str(get_moves(self.unit_pos, self.unit_pos_next_step[0:len(self.unit_pos)])))
+        print(len(get_moves(self.unit_pos, self.unit_pos_next_step[0:len(self.unit_pos)])))
+        return zip(self.unit_ids, get_moves(self.unit_pos, self.unit_pos_next_step[0:len(self.unit_pos)]))
 
-    def update_state(self, unit_pos:  np.ndarray):
-        assert(len(unit_pos) == len(self.unit_idxs))
-        self.unit_pos = unit_pos
-        self.in_formation = self.check_in_formation()
+    def release(self):
+        pass
 
 
 # -----------------------------------------------------------------------------
@@ -953,6 +982,8 @@ class Player:
 
         self.scout_team = Scouts(self.logger, self, 'scouts1', self.num_scouts)
         self.default_soldiers = DefaultSoldier(self.logger, self, 'default1', self.midsorted_outer_wall_angles)
+        self.special_forces = [SpecialForce(self.logger, self, f'specialforce{i}', 13, 5) for i in range(1)]
+        self.special_forces[0].set_target_enemy([20, 25])
         self.macro_army = MacroArmy(self.logger, self, 'macro_army1', self.resource_pool)
 
     def debug(self, *args):
@@ -1028,6 +1059,7 @@ class Player:
 
             # allocation phase
             self.scout_team.select()
+            self.special_forces[0].select()
             if self.day_n == self.cb_scheduled[0]:
                 self.macro_army.select()
             self.default_soldiers.select()
@@ -1038,6 +1070,8 @@ class Player:
             self.debug(f'Moves after macro: {moves}')
             moves.extend(self.scout_team.move())
             self.debug(f'Moves after scout: {moves}')
+            moves.extend(self.special_forces[0].move())
+            self.debug(f'Moves after special_force[0]: {moves}')
             moves.extend(self.default_soldiers.move())
             self.debug(f'Moves after default: {moves}')
 
@@ -1051,6 +1085,7 @@ class Player:
 
             # allocation phase
             self.scout_team.select()
+            self.special_forces[0].select()
             self.default_soldiers.select()
 
             # mobilization phase
@@ -1060,6 +1095,9 @@ class Player:
             
             start = time.time()
             moves.extend(self.scout_team.move())
+            self.debug(f'moves BEFORE special force: {moves}')
+            moves.extend(self.special_forces[0].move())
+            self.debug(f'moves after special force: {moves}')
             self.debug(f'Offense: {time.time()-start}s')
 
         # reorder all moves
