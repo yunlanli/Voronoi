@@ -1008,14 +1008,16 @@ class Player:
             self.debug(f'day {self.day_n}: consoldiate border')
             moves = []
             
-            self.macro_army = MacroArmy(self.logger, self, 'macro_army', self.resource_pool)
+            self.scout_team.select()
+
+            if self.day_n == self.cb_scheduled[0]:
+                self.macro_army = MacroArmy(self.logger, self, 'macro_army', self.resource_pool)
+                self.macro_army.select()
 
             if self.day_n == self.cb_scheduled[1] - 1:
                 self.cb_scheduled += (self.COOL_DOWN + self.CB_DURATION)
             
             # allocation phase
-            self.scout_team.select()
-            self.macro_army.select()
             self.default_soldiers.select()
 
             # mobilization phase
