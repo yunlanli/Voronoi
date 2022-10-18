@@ -729,7 +729,7 @@ class MacroArmy(RoleTemplate):
     def release(self):
         if not self.unit_ids is None:
             units_unreleased = self.resource.release_units(self.name, self.unit_ids)
-        self._debug('units_unreleased:', units_unreleased)
+            self._debug('units_unreleased:', units_unreleased)
         self._initialize_params()
 
 class SpecialForce(RoleTemplate):
@@ -765,7 +765,7 @@ class SpecialForce(RoleTemplate):
         units_needed = self.team_size - self.actual_size
 
         if units_needed:
-            units_free = self.resource_pool.get_free_units()
+            units_free = sorted(self.resource_pool.get_free_units())
             units_request = units_free[(-1) * min(units_needed, len(units_free)):len(units_free)]
             units_unclaimed = self.resource_pool.claim_units(self.name, units_request)
 
@@ -800,7 +800,7 @@ class SpecialForce(RoleTemplate):
 
     def __create_formation(self):
         precomp_formation = [[0, 0]]
-        concentric_circle_points = [[1, 0]] # radius, points
+        concentric_circle_points = [[math.sqrt(self.team_size), 0]] # radius, points
 
         for i in range(self.team_size - 1):
             circle_0_radius = concentric_circle_points[0][0]
@@ -868,6 +868,9 @@ class SpecialForce(RoleTemplate):
     
     @property
     def centroid(self):
+        if len(self.unit_pos) == 0:
+            return [0, 0]
+        
         return np.average(np.subtract(self.unit_pos, self.formation[0:len(self.unit_pos)]), axis = 0)
 
     def __congregate(self):
@@ -975,7 +978,7 @@ class Player:
         self.sf_units_per_team = max(self.sf_units // 5, 10)
         self.sf_units_per_team = min(self.sf_units_per_team, self.sf_units)
 
-        self.sf_count = 3
+        self.sf_count = 4
 
         # SAMPLE SQUAD
         '''
@@ -992,14 +995,15 @@ class Player:
         self.default_soldiers = DefaultSoldier(self.logger, self, 'default1', self.midsorted_outer_wall_angles)
         self.macro_army = MacroArmy(self.logger, self, 'macro_army1', self.resource_pool)
 
-        self.special_forces = [SpecialForce(self.logger, self, f'specialforce{i}', 13, 5) for i in range(self.sf_count)]
-        self.sf_target_ids = [[1,-1] for _ in range(self.sf_count)] #[team, unit_id]
+        self.special_forces = [SpecialForce(self.logger, self, f'specialforce{i}', 8, 4) for i in range(self.sf_count)]
+        self.special_forces_existing = [0 for _ in range(self.sf_count)]
+        # self.sf_target_ids = [[1,-1] for _ in range(self.sf_count)] #[team, unit_id]
 
     def debug(self, *args):
         self.logger.info(" ".join(str(a) for a in args))
 
     def set_hyperparam(self, spawn_days):
-        self.CB_START = 100000
+        self.CB_START = 35
         self.CB_DURATION = 5 # days dedicated to border consolidation in each cycle
         if spawn_days < 5:
             self.COOL_DOWN = 5
@@ -1045,7 +1049,7 @@ class Player:
         self.resource_pool.update_state()
 
         # compute ally and enemey distances
-        for i in range(self.sf_count):
+        '''for i in range(self.sf_count):
             opponent_id = i
             if self.us <= i:
                 opponent_id += 1
@@ -1055,9 +1059,9 @@ class Player:
                 enemy_dist = ((self.float_unit_pos[opponent_id] - self.homebase) ** 2).sum(axis=1)
                 
                 self.sf_target_ids[i] = self.unit_id[opponent_id][enemy_dist.argmin()]
-                '''min_enemy_cord = self.enemy_units[enemy_dist.argmin()]
-                self.special_forces[i].set_target_enemy(min_enemy_cord)
-                enemy_dist[enemy_dist.argmin()] = 500'''
+                # min_enemy_cord = self.enemy_units[enemy_dist.argmin()]
+                # self.special_forces[i].set_target_enemy(min_enemy_cord)
+                # enemy_dist[enemy_dist.argmin()] = 500
         
         for i in range(self.sf_count):
             opponent_id = i
@@ -1066,7 +1070,23 @@ class Player:
             
             [idx] = np.where(np.in1d(np.array(self.unit_id[opponent_id]), np.array([self.sf_target_ids[i]])))[0]
 
-            self.special_forces[i].set_target_enemy(self.float_unit_pos[opponent_id][idx])
+            self.special_forces[i].set_target_enemy(self.float_unit_pos[opponent_id][idx])'''
+        opponents = np.array([0, 1, 2, 3])
+        opponents = np.delete(opponents, self.us)
+
+        for i in range(self.sf_count):
+            opponent_id = opponents[i % 3]
+            
+            enemy_dist_from_homebase = ((self.float_unit_pos[opponent_id] - self.homebase) ** 2).sum(axis=1)
+            enemy_dist_from_self = ((self.float_unit_pos[opponent_id] - np.array(self.special_forces[i].centroid)) ** 2).sum(axis=1)
+
+            homebase_weight = 0.7
+
+            total_dist = (homebase_weight * enemy_dist_from_homebase) + ((1-homebase_weight) * enemy_dist_from_self)
+
+            min_enemy_cord = unit_pos[opponent_id][total_dist.argmin()]
+            self.special_forces[i].set_target_enemy(min_enemy_cord)
+                
 
 
         self.debug()
@@ -1093,8 +1113,13 @@ class Player:
 
             # allocation phase
             self.scout_team.select()
+            
             for i in range(self.sf_count):
-                self.special_forces[i].select()
+                if self.special_forces_existing[i] or (len(self.resource_pool.get_free_units()) >= 30 and (self.day_n > 35 + (i * 30))):
+                    self.special_forces_existing[i] = 1
+                    self.special_forces[i].select()
+                else:
+                    break
             if self.day_n == self.cb_scheduled[0]:
                 self.macro_army.select()
             self.default_soldiers.select()
