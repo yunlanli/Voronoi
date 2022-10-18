@@ -923,7 +923,7 @@ class Player:
         self.target_loc = []
 
         self.initial_radius = 35
-        self.num_scouts = 3
+        self.num_scouts = 1
 
         base_angles = get_base_angles(player_idx)
         outer_wall_angles = np.linspace(start=base_angles[0], stop=base_angles[1], num=int(self.initial_radius * 2 / 1.4))
@@ -1073,16 +1073,33 @@ class Player:
     def get_border(self):
         """Get border of our territory"""
         # trace along x axis to find the starting point
+        pt = None
         if self.us < 2: # 0, 1
             for i in range(100):
                 if self.map_states[i, 99*self.us] != self.us:
                     pt = (i-1, 99*self.us)
                     break
+            if pt is None:
+                for i in range(100):
+                    if self.map_states[0, 99*self.us-i] != self.us:
+                        pt = (0, 99*self.us-i+1)
+                        break
         else: # 2, 3
             for i in range(100):
                 if self.map_states[99-i, 99*(3-self.us)] != self.us:
                     pt = (99-i+1, 99*(3-self.us))
                     break
+            if pt is None:
+                if self.us == 2:
+                    for i in range(100):
+                        if self.map_states[99, 99-i] != self.us:
+                            pt = (99, 99-i+1)
+                            break
+                else:
+                    for i in range(100):
+                        if self.map_states[99, i] != self.us:
+                            pt = (99, i-1)
+                            break
 
         border = set()
         self._trace_border(pt, border)
@@ -1215,7 +1232,7 @@ def assign_by_ot(unit_pos, target_loc):
     Returns reordered target_loc optimally mapped to each unit - shape (N, 2)
     """
     a, b = np.ones((unit_pos.shape[0],)) / unit_pos.shape[0] , np.ones((target_loc.shape[0],)) / target_loc.shape[0]  # uniform weights on points
-    M = ot.dist(unit_pos, target_loc, metric='sqeuclidean') # cost matrix
+    M = ot.dist(unit_pos, target_loc, metric='euclidean') # cost matrix
     assignment = ot.emd(a, b, M).argmax(axis=1) # OT linear program solver
     return target_loc[assignment]
 
