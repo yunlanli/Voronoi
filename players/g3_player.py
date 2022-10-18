@@ -682,6 +682,7 @@ class MacroArmy(RoleTemplate):
         self.unit_pos = None
         self.targets = None
         self.MAX_UNITS = 500
+        self.MIN_UNITS = 20
 
     def select(self):
         # it would be good if get_free_units() returns an array and claim_units() takes input an array
@@ -690,13 +691,17 @@ class MacroArmy(RoleTemplate):
         unclaimed_ids = self.resource.claim_units(self.name, request_ids.tolist())
 
         self.unit_ids = np.array(self.resource.get_team_ids(self.name))
+        
+        # not worth doing optimal mapping
+        if self.unit_ids.shape[0] < self.MIN_UNITS:
+            self.release()
 
         self._debug(f'request   ({len(request_ids)}: {request_ids}')
         self._debug(f'unclaimed ({len(unclaimed_ids)}: {unclaimed_ids}')
         self._debug('unit_ids: ', self.unit_ids)
 
     def move(self) -> List[Umove]:
-        if self.unit_ids.shape[0] == 0:
+        if self.unit_ids is None or self.unit_ids.shape[0] == 0:
             return []
         if self.targets is None:
             # Only calculate border and OT assignments once at creation
@@ -722,9 +727,9 @@ class MacroArmy(RoleTemplate):
         return list(zip(self.unit_ids.tolist(), get_moves(self.unit_pos, self.targets)))
 
     def release(self):
-        units_unreleased = self.resource.release_units(self.name, self.unit_ids)
+        if not self.unit_ids is None:
+            units_unreleased = self.resource.release_units(self.name, self.unit_ids)
         self._debug('units_unreleased:', units_unreleased)
-
         self._initialize_params()
 
 class SpecialForce(RoleTemplate):
@@ -1059,7 +1064,7 @@ class Player:
 
             # allocation phase
             self.scout_team.select()
-            self.special_forces[0].select()
+            #self.special_forces[0].select()
             if self.day_n == self.cb_scheduled[0]:
                 self.macro_army.select()
             self.default_soldiers.select()
@@ -1070,7 +1075,7 @@ class Player:
             self.debug(f'Moves after macro: {moves}')
             moves.extend(self.scout_team.move())
             self.debug(f'Moves after scout: {moves}')
-            moves.extend(self.special_forces[0].move())
+            #moves.extend(self.special_forces[0].move())
             self.debug(f'Moves after special_force[0]: {moves}')
             moves.extend(self.default_soldiers.move())
             self.debug(f'Moves after default: {moves}')
@@ -1085,7 +1090,7 @@ class Player:
 
             # allocation phase
             self.scout_team.select()
-            self.special_forces[0].select()
+            #self.special_forces[0].select()
             self.default_soldiers.select()
 
             # mobilization phase
@@ -1096,7 +1101,7 @@ class Player:
             start = time.time()
             moves.extend(self.scout_team.move())
             self.debug(f'moves BEFORE special force: {moves}')
-            moves.extend(self.special_forces[0].move())
+            #moves.extend(self.special_forces[0].move())
             self.debug(f'moves after special force: {moves}')
             self.debug(f'Offense: {time.time()-start}s')
 
