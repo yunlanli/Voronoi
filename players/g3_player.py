@@ -556,7 +556,9 @@ class DefaultSoldier(RoleTemplate):
             for i, plevel in enumerate(pressure_levels)
         ]
 
-        return list(zip(self.unit_ids, soldier_moves))
+        moves = list(zip(self.unit_ids, soldier_moves))
+        self._debug(f'{len(moves)} moves: {moves}')
+        return moves
     
     def release(self):
         pass
@@ -663,7 +665,9 @@ class Scouts(RoleTemplate):
                 enemy_clusters, ally_clusters = self._get_clusters(ally_units)
                 scout_moves[i] = self._explore(scout_units[i], enemy_clusters, ally_clusters)
 
-        return list(zip(self.unit_ids, ndarray_to_moves(scout_moves)))
+        moves = list(zip(self.unit_ids, ndarray_to_moves(scout_moves)))
+        self._debug(f'{len(moves)} moves: {moves}')
+        return moves
 
     def release(self):
         pass
@@ -696,8 +700,8 @@ class MacroArmy(RoleTemplate):
         if self.unit_ids.shape[0] < self.MIN_UNITS:
             self.release()
 
-        self._debug(f'request   ({len(request_ids)}: {request_ids}')
-        self._debug(f'unclaimed ({len(unclaimed_ids)}: {unclaimed_ids}')
+        self._debug(f'request   ({len(request_ids)}): {request_ids}')
+        self._debug(f'unclaimed ({len(unclaimed_ids)}): {unclaimed_ids}')
         self._debug('unit_ids: ', self.unit_ids)
 
     def move(self) -> List[Umove]:
@@ -711,20 +715,16 @@ class MacroArmy(RoleTemplate):
             self.targets = assign_by_ot(self.unit_pos, selected_border)
         else:
             # remove dead units without changing assignments for other units
-            dead_units = []
-            for i, unit_id in enumerate(self.unit_ids):
-                if self.resource.is_dead(unit_id):
-                    dead_units.append(i)
-            self._debug(f'dead_units: {dead_units}')
+            dead_units = [i for i, uid in enumerate(self.unit_ids) if self.resource.is_dead(uid)]
+            self._debug(f'dead unit indices (#: {len(dead_units)}): {dead_units}')
+
             self.unit_ids = np.delete(self.unit_ids, dead_units, axis=0)
-            if self.unit_ids.shape[0] == 0:
-                return []
             self.unit_pos = np.array(self.resource.get_positions(self.unit_ids)) # update unit pos
             self.targets = np.delete(self.targets, dead_units, axis=0)
 
-        self._debug(f'unit_pos ({self.unit_pos.shape}): {self.unit_pos}')
-        self._debug(f'targets ({self.targets.shape}): {self.targets}')
-        return list(zip(self.unit_ids.tolist(), get_moves(self.unit_pos, self.targets)))
+        moves = list(zip(self.unit_ids.tolist(), get_moves(self.unit_pos, self.targets)))
+        self._debug(f'{len(moves)} moves: {moves}')
+        return moves
 
     def release(self):
         if not self.unit_ids is None:
@@ -1049,28 +1049,6 @@ class Player:
         self.resource_pool.update_state()
 
         # compute ally and enemey distances
-        '''for i in range(self.sf_count):
-            opponent_id = i
-            if self.us <= i:
-                opponent_id += 1
-            
-            if self.sf_target_ids[i] not in self.unit_id[opponent_id]:
-                # enemy_dist = ((self.enemy_units - self.homebase) ** 2).sum(axis=1)
-                enemy_dist = ((self.float_unit_pos[opponent_id] - self.homebase) ** 2).sum(axis=1)
-                
-                self.sf_target_ids[i] = self.unit_id[opponent_id][enemy_dist.argmin()]
-                # min_enemy_cord = self.enemy_units[enemy_dist.argmin()]
-                # self.special_forces[i].set_target_enemy(min_enemy_cord)
-                # enemy_dist[enemy_dist.argmin()] = 500
-        
-        for i in range(self.sf_count):
-            opponent_id = i
-            if self.us <= i:
-                opponent_id += 1
-            
-            [idx] = np.where(np.in1d(np.array(self.unit_id[opponent_id]), np.array([self.sf_target_ids[i]])))[0]
-
-            self.special_forces[i].set_target_enemy(self.float_unit_pos[opponent_id][idx])'''
         opponents = np.array([0, 1, 2, 3])
         opponents = np.delete(opponents, self.us)
 
@@ -1126,14 +1104,11 @@ class Player:
             # mobilization phase
             moves = []
             moves.extend(self.macro_army.move())
-            self.debug(f'Moves after macro: {moves}')
             moves.extend(self.scout_team.move())
-            self.debug(f'Moves after scout: {moves}')
             for i in range(self.sf_count):
-                moves.extend(self.special_forces[i].move())
-            self.debug(f'Moves after special_forces: {moves}')
+                if self.special_forces_existing[i]:
+                    moves.extend(self.special_forces[i].move())
             moves.extend(self.default_soldiers.move())
-            self.debug(f'Moves after default: {moves}')
 
             if self.day_n == self.cb_scheduled[1] - 1:
                 self.cb_scheduled += (self.COOL_DOWN + self.CB_DURATION)
@@ -1146,7 +1121,9 @@ class Player:
             # allocation phase
             self.scout_team.select()
             for i in range(self.sf_count):
-                self.special_forces[i].select()
+                if self.special_forces_existing[i] or (len(self.resource_pool.get_free_units()) >= 30 and (self.day_n > 35 + (i * 30))):
+                    self.special_forces_existing[i] = 1
+                    self.special_forces[i].select()
             self.default_soldiers.select()
 
             # mobilization phase
@@ -1156,15 +1133,16 @@ class Player:
             
             start = time.time()
             moves.extend(self.scout_team.move())
-            self.debug(f'moves BEFORE special force: {moves}')
             for i in range(self.sf_count):
-                moves.extend(self.special_forces[i].move())
-            self.debug(f'moves after special force: {moves}')
+                if self.special_forces_existing[i]:
+                    moves.extend(self.special_forces[i].move())
             self.debug(f'Offense: {time.time()-start}s')
 
         # reorder all moves
         sorted_moves = self.integrate_moves(moves)
-        self.debug(f'Sorted moves: {sorted_moves}')
+        self.debug(f'all {len(moves)} moves (macro_army, scout, special_forces, default): {moves}')
+        self.debug(f'Sorted moves (#: {len(sorted_moves)}): {sorted_moves}')
+        self.debug(f'resource pool: {self.resource_pool.team_to_unit_dict}')
         return sorted_moves
 
     def integrate_moves(self, all_moves: List[Umove]) -> List[Move]:
