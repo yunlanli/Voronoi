@@ -1118,8 +1118,7 @@ class Player:
                 if self.special_forces_existing[i] or (len(self.resource_pool.get_free_units()) >= 30 and (self.day_n > 35 + (i * 30))):
                     self.special_forces_existing[i] = 1
                     self.special_forces[i].select()
-                else:
-                    break
+                    
             if self.day_n == self.cb_scheduled[0]:
                 self.macro_army.select()
             self.default_soldiers.select()
