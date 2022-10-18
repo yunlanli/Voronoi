@@ -761,7 +761,7 @@ class SpecialForce(RoleTemplate):
 
         if units_needed:
             units_free = self.resource_pool.get_free_units()
-            units_request = units_free[:min(units_needed, len(units_free))]
+            units_request = units_free[(-1) * min(units_needed, len(units_free)):len(units_free)]
             units_unclaimed = self.resource_pool.claim_units(self.name, units_request)
 
             self._debug(f'units target: {self.team_size}, actual: {self.actual_size} => need {units_needed} units')
@@ -888,12 +888,13 @@ class SpecialForce(RoleTemplate):
         self.unit_pos_next_step = self.__compute_formation_positions_around_centroid(centroid = cur_centroid + unit_vec_towards_enemy)[0: len(self.unit_ids)]
 
     def move(self):
-        if self.in_formation or (self.attacking and self.died_while_attacking <= self.tolerance):
+        if len(self.unit_pos) > 0 and (self.in_formation or (self.attacking and self.died_while_attacking <= self.tolerance)):
             print("attacking")
             self.attacking = True
             self.__attack_target_enemy()
         else:
             print("congregateing")
+            self.attacking = False
             self.__congregate()
         
         if len(self.unit_pos) == 0:
@@ -969,6 +970,8 @@ class Player:
         self.sf_units_per_team = max(self.sf_units // 5, 10)
         self.sf_units_per_team = min(self.sf_units_per_team, self.sf_units)
 
+        self.sf_count = 3
+
         # SAMPLE SQUAD
         '''
         self.special_forces = [SpecialForce(self.logger, self.us, id=i, team_size=13) for i in range(1)]
@@ -982,8 +985,7 @@ class Player:
 
         self.scout_team = Scouts(self.logger, self, 'scouts1', self.num_scouts)
         self.default_soldiers = DefaultSoldier(self.logger, self, 'default1', self.midsorted_outer_wall_angles)
-        self.special_forces = [SpecialForce(self.logger, self, f'specialforce{i}', 13, 5) for i in range(1)]
-        self.special_forces[0].set_target_enemy([20, 25])
+        self.special_forces = [SpecialForce(self.logger, self, f'specialforce{i}', 13, 5) for i in range(self.sf_count)]
         self.macro_army = MacroArmy(self.logger, self, 'macro_army1', self.resource_pool)
 
     def debug(self, *args):
@@ -1035,6 +1037,13 @@ class Player:
 
         self.resource_pool.update_state()
 
+        # compute ally and enemey distances
+        enemy_dist = ((self.enemy_units - self.homebase) ** 2).sum(axis=1)
+        for i in range(self.sf_count):
+            min_enemy_cord = self.enemy_units[enemy_dist.argmin()]
+            self.special_forces[i].set_target_enemy(min_enemy_cord)
+            enemy_dist[enemy_dist.argmin()] = 500
+
         self.debug()
         self.debug(f'unit_ids: {unit_id[self.us]}')
         self.debug(f'len(unit_pos): {len(unit_pos[self.us])}, len(unit_ids): {len(unit_id[self.us])}')
@@ -1059,7 +1068,8 @@ class Player:
 
             # allocation phase
             self.scout_team.select()
-            self.special_forces[0].select()
+            for i in range(self.sf_count):
+                self.special_forces[i].select()
             if self.day_n == self.cb_scheduled[0]:
                 self.macro_army.select()
             self.default_soldiers.select()
@@ -1070,8 +1080,9 @@ class Player:
             self.debug(f'Moves after macro: {moves}')
             moves.extend(self.scout_team.move())
             self.debug(f'Moves after scout: {moves}')
-            moves.extend(self.special_forces[0].move())
-            self.debug(f'Moves after special_force[0]: {moves}')
+            for i in range(self.sf_count):
+                moves.extend(self.special_forces[i].move())
+            self.debug(f'Moves after special_forces: {moves}')
             moves.extend(self.default_soldiers.move())
             self.debug(f'Moves after default: {moves}')
 
@@ -1085,7 +1096,8 @@ class Player:
 
             # allocation phase
             self.scout_team.select()
-            self.special_forces[0].select()
+            for i in range(self.sf_count):
+                self.special_forces[i].select()
             self.default_soldiers.select()
 
             # mobilization phase
@@ -1096,7 +1108,8 @@ class Player:
             start = time.time()
             moves.extend(self.scout_team.move())
             self.debug(f'moves BEFORE special force: {moves}')
-            moves.extend(self.special_forces[0].move())
+            for i in range(self.sf_count):
+                moves.extend(self.special_forces[i].move())
             self.debug(f'moves after special force: {moves}')
             self.debug(f'Offense: {time.time()-start}s')
 
