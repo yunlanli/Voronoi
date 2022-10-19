@@ -986,6 +986,8 @@ class Player:
         self.sf_units_per_team = max(self.sf_units // 5, 10)
         self.sf_units_per_team = min(self.sf_units_per_team, self.sf_units)
 
+        self.total_days = total_days
+
 
         # SAMPLE SQUAD
         '''
@@ -1063,37 +1065,35 @@ class Player:
 
         self.resource_pool.update_state()
 
-        # compute ally and enemey distances
-        opponents = np.array([0, 1, 2, 3])
-        opponents = np.delete(opponents, self.us)
+        # choose enemy target
+        if len(self.enemy_units) > 0:
+            home2enemies = self.enemy_units - self.homebase
+            angles = np.arctan2(home2enemies[:,1], home2enemies[:,0]) + ((np.pi/2) * (self.us))
+            if self.us == 4:
+                angles -= 2 * np.pi
+            
+            angles2enemies = dict()
+            portion = math.pi / (2 * self.sf_count)
+            for i in range(self.sf_count):
+                lo, hi = portion * i, portion * (i + 1)
+                enemy_idx = np.where((angles >= lo) & (angles < hi))[0]
+                angles2enemies[i] = self.enemy_units[enemy_idx]
 
-        home2enemies = self.enemy_units - self.homebase
-        angles = np.arctan2(home2enemies[:,1], home2enemies[:,0]) + ((np.pi/2) * (self.us))
-        if self.us == 4:
-            angles -= 2 * np.pi
-        
-        angles2enemies = dict()
-        portion = math.pi / (2 * self.sf_count)
-        for i in range(self.sf_count):
-            lo, hi = portion * i, portion * (i + 1)
-            enemy_idx = np.where((angles >= lo) & (angles < hi))[0]
-            angles2enemies[i] = self.enemy_units[enemy_idx]
+            for i in range(self.sf_count):
+                if self.special_forces_existing[i]:
+                    opponent_pos = angles2enemies[i]
 
-        for i in range(self.sf_count):
-            if self.special_forces_existing[i]:
-                opponent_pos = angles2enemies[i]
+                    # TODO: what if opponent_pos is an empty array?
+                    if len(opponent_pos):
+                        enemy_dist_from_homebase = ((opponent_pos - self.homebase) ** 2).sum(axis=1)
+                        enemy_dist_from_self = ((opponent_pos - np.array(self.special_forces[i].centroid)) ** 2).sum(axis=1)
 
-                # TODO: what if opponent_pos is an empty array?
-                if len(opponent_pos):
-                    enemy_dist_from_homebase = ((opponent_pos - self.homebase) ** 2).sum(axis=1)
-                    enemy_dist_from_self = ((opponent_pos - np.array(self.special_forces[i].centroid)) ** 2).sum(axis=1)
+                        homebase_weight = 0.7
 
-                    homebase_weight = 0.7
+                        total_dist = (homebase_weight * enemy_dist_from_homebase) + ((1-homebase_weight) * enemy_dist_from_self)
 
-                    total_dist = (homebase_weight * enemy_dist_from_homebase) + ((1-homebase_weight) * enemy_dist_from_self)
-
-                    min_enemy_cord = opponent_pos[total_dist.argmin()]
-                    self.special_forces[i].set_target_enemy(min_enemy_cord)
+                        min_enemy_cord = opponent_pos[total_dist.argmin()]
+                        self.special_forces[i].set_target_enemy(min_enemy_cord)
 
 
         self.debug()
@@ -1175,16 +1175,25 @@ class Player:
         return sorted_moves
 
     def allocate_sf(self):
+        if self.total_days <= 50:
+            return
+        
         for i in range(self.sf_count):
             num_free = len(self.resource_pool.get_free_units())
             affordable = (self.our_units.shape[0] > i * self.troops_per_sf) # we want ratio of sepcial force to total to be at most 8-30
+            higher_bar_affordable = (self.our_units.shape[0] > i + 1 * self.troops_per_sf) # we want ratio of sepcial force to total to be at most 8-30
+
+            if self.total_days <= 100:
+                affordable = True # we want ratio of sepcial force to total to be at most 8-30
+                higher_bar_affordable = True # we want ratio of sepcial force to total to be at most 8-30
+
             if self.special_forces_existing[i] == 1:
                 if affordable:
                     self.special_forces[i].select()
                 else:
                     self.special_forces_existing[i] == 0
                     self.special_forces[i].release()
-            elif num_free >= 30 and affordable:
+            elif num_free >= 30 and higher_bar_affordable:
                 self.special_forces_existing[i] = 1
                 self.special_forces[i].select()
 
