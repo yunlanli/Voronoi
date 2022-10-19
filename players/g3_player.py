@@ -950,6 +950,8 @@ class Player:
         self.logger = logger
         self.logger.setLevel(LOG_LEVEL)
 
+        self.total_days = total_days
+
         self.unit_id = []
         self.our_unit_ids = []
         self.float_unit_pos = [[], [], [], []]
@@ -986,8 +988,6 @@ class Player:
         self.sf_units_per_team = max(self.sf_units // 5, 10)
         self.sf_units_per_team = min(self.sf_units_per_team, self.sf_units)
 
-        self.total_days = total_days
-
 
         # SAMPLE SQUAD
         '''
@@ -1015,6 +1015,8 @@ class Player:
         self.num_scouts = 3
 
         self.sf_count = 3
+        self.sf_count = max(math.floor((self.total_days // spawn_days) / 45), 1)
+
         self.troops_per_sf = 40 # keep sf-total ratio to be under 8-40
 
         self.CB_START = 35
