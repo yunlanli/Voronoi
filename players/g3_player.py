@@ -672,7 +672,6 @@ class Scouts(RoleTemplate):
     def release(self):
         pass
 
-
 class MacroArmy(RoleTemplate):
 
     def __init__(self, logger, player, name: Tid, resource: ResourcePool):
@@ -1053,18 +1052,21 @@ class Player:
         opponents = np.delete(opponents, self.us)
 
         for i in range(self.sf_count):
-            opponent_id = opponents[i % 3]
-            
-            enemy_dist_from_homebase = ((self.float_unit_pos[opponent_id] - self.homebase) ** 2).sum(axis=1)
-            enemy_dist_from_self = ((self.float_unit_pos[opponent_id] - np.array(self.special_forces[i].centroid)) ** 2).sum(axis=1)
+            if self.special_forces_existing[i]:
+                opponent_id = opponents[i % 3]
+                opponent_pos = self.float_unit_pos[opponent_id]
 
-            homebase_weight = 0.7
+                # TODO: what if opponent_pos is an empty array?
+                if len(opponent_pos):
+                    enemy_dist_from_homebase = ((opponent_pos - self.homebase) ** 2).sum(axis=1)
+                    enemy_dist_from_self = ((opponent_pos - np.array(self.special_forces[i].centroid)) ** 2).sum(axis=1)
 
-            total_dist = (homebase_weight * enemy_dist_from_homebase) + ((1-homebase_weight) * enemy_dist_from_self)
+                    homebase_weight = 0.7
 
-            min_enemy_cord = unit_pos[opponent_id][total_dist.argmin()]
-            self.special_forces[i].set_target_enemy(min_enemy_cord)
-                
+                    total_dist = (homebase_weight * enemy_dist_from_homebase) + ((1-homebase_weight) * enemy_dist_from_self)
+
+                    min_enemy_cord = unit_pos[opponent_id][total_dist.argmin()]
+                    self.special_forces[i].set_target_enemy(min_enemy_cord)
 
 
         self.debug()
