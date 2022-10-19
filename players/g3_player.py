@@ -1017,7 +1017,7 @@ class Player:
         self.sf_count = 3
         self.sf_count = max(math.floor((self.total_days // spawn_days) / 45), 1)
 
-        self.troops_per_sf = 40 # keep sf-total ratio to be under 8-40
+        self.troops_per_sf = 30 # keep sf-total ratio to be under 8-40
 
         self.CB_START = 35
         self.CB_DURATION = 5 # days dedicated to border consolidation in each cycle
@@ -1076,14 +1076,15 @@ class Player:
             
             angles2enemies = dict()
             portion = math.pi / (2 * self.sf_count)
-            for i in range(self.sf_count):
+            for i in range(sum(self.special_forces_existing)):
                 lo, hi = portion * i, portion * (i + 1)
                 enemy_idx = np.where((angles >= lo) & (angles < hi))[0]
                 angles2enemies[i] = self.enemy_units[enemy_idx]
-
+            
+            counter = 0
             for i in range(self.sf_count):
                 if self.special_forces_existing[i]:
-                    opponent_pos = angles2enemies[i]
+                    opponent_pos = angles2enemies[counter]
 
                     # TODO: what if opponent_pos is an empty array?
                     if len(opponent_pos):
@@ -1096,6 +1097,8 @@ class Player:
 
                         min_enemy_cord = opponent_pos[total_dist.argmin()]
                         self.special_forces[i].set_target_enemy(min_enemy_cord)
+                    
+                    counter += 1
 
 
         self.debug()
