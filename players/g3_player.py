@@ -1007,7 +1007,7 @@ class Player:
         # self.sf_target_ids = [[1,-1] for _ in range(self.sf_count)] #[team, unit_id]
 
     def debug(self, *args):
-        self.logger.info(" ".join(str(a) for a in args))
+        self.logger.debug(" ".join(str(a) for a in args))
 
     def set_hyperparam(self, spawn_days):
         self.num_scouts = 3
@@ -1067,10 +1067,21 @@ class Player:
         opponents = np.array([0, 1, 2, 3])
         opponents = np.delete(opponents, self.us)
 
+        home2enemies = self.enemy_units - self.homebase
+        angles = np.arctan2(home2enemies[:,1], home2enemies[:,0]) + ((np.pi/2) * (self.us))
+        if self.us == 4:
+            angles -= 2 * np.pi
+        
+        angles2enemies = dict()
+        portion = math.pi / (2 * self.sf_count)
+        for i in range(self.sf_count):
+            lo, hi = portion * i, portion * (i + 1)
+            enemy_idx = np.where((angles >= lo) & (angles < hi))[0]
+            angles2enemies[i] = self.enemy_units[enemy_idx]
+
         for i in range(self.sf_count):
             if self.special_forces_existing[i]:
-                opponent_id = opponents[i % 3]
-                opponent_pos = self.float_unit_pos[opponent_id]
+                opponent_pos = angles2enemies[i]
 
                 # TODO: what if opponent_pos is an empty array?
                 if len(opponent_pos):
@@ -1081,7 +1092,7 @@ class Player:
 
                     total_dist = (homebase_weight * enemy_dist_from_homebase) + ((1-homebase_weight) * enemy_dist_from_self)
 
-                    min_enemy_cord = unit_pos[opponent_id][total_dist.argmin()]
+                    min_enemy_cord = opponent_pos[total_dist.argmin()]
                     self.special_forces[i].set_target_enemy(min_enemy_cord)
 
 
