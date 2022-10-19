@@ -1095,15 +1095,23 @@ class Player:
         if self.day_n < self.initial_radius:
             self.debug(f'day {self.day_n}: form initial wall')
 
-            while len(unit_id[self.us]) > len(self.target_loc):
+            self.scout_team.select()
+            scout_moves = [move for _, move in self.scout_team.move()]
+            scout_team_size = self.scout_team.actual_size
+
+            wall_unit_ids = unit_id[self.us][scout_team_size:]
+            wall_unit_pos = unit_pos[self.us][scout_team_size:]
+
+            while len(wall_unit_ids) > len(self.target_loc):
                 # add new target_locations
                 self.target_loc.append(order2coord(
                         self.homebase,
-                        [self.initial_radius, self.midsorted_outer_wall_angles[len(unit_id[self.us]) - 1]]
+                        [self.initial_radius, self.midsorted_outer_wall_angles[len(wall_unit_ids) - 1]]
                 ))
+            wall_moves = get_moves(shapely_pts_to_tuples(wall_unit_pos), self.target_loc)
         
-            return get_moves(shapely_pts_to_tuples(unit_pos[self.us]), self.target_loc)
-
+            return scout_moves + wall_moves
+            
         elif self.day_n >= self.cb_scheduled[0] and self.day_n < self.cb_scheduled[1]:
             self.debug(f'day {self.day_n}: consoldiate border')
 
@@ -1358,6 +1366,9 @@ def get_moves(unit_pos, target_loc) -> List[Tuple[float, float]]:
         assert unit_pos.shape[0] == target_loc.shape[0], "get_moves: unit_pos and target_loc array length not the same"
         np_unit_pos = unit_pos
         np_target_loc = target_loc
+
+    if len(unit_pos) == 0:
+        return []
 
     cord_diff = np_target_loc - np_unit_pos
     cord_diff_x = cord_diff[:, 0]
