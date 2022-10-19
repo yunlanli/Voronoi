@@ -684,6 +684,7 @@ class MacroArmy(RoleTemplate):
         self.unit_ids = None
         self.unit_pos = None
         self.targets = None
+        self.border = None
         self.MAX_UNITS = 500
         self.MIN_UNITS = 20
 
@@ -709,8 +710,8 @@ class MacroArmy(RoleTemplate):
         if self.targets is None:
             # Only calculate border and OT assignments once at creation
             self.unit_pos = np.array(self.resource.get_positions(self.unit_ids))
-            border = self.resource.player.get_border()
-            selected_border = border[np.random.choice(np.arange(border.shape[0]), size=min(border.shape[0], self.unit_pos.shape[0]), replace=False)]
+            self.border = self.resource.player.get_border()
+            selected_border = self.border[np.random.choice(np.arange(self.border.shape[0]), size=min(self.border.shape[0], self.unit_pos.shape[0]), replace=False)]
             self.targets = assign_by_ot(self.unit_pos, selected_border)
         else:
             # remove dead units without changing assignments for other units
@@ -718,8 +719,11 @@ class MacroArmy(RoleTemplate):
             self._debug(f'dead unit indices (#: {len(dead_units)}): {dead_units}')
 
             self.unit_ids = np.delete(self.unit_ids, dead_units, axis=0)
+            if self.unit_ids.shape[0] == 0:
+                return []
             self.unit_pos = np.array(self.resource.get_positions(self.unit_ids)) # update unit pos
-            self.targets = np.delete(self.targets, dead_units, axis=0)
+            selected_border = self.border[np.random.choice(np.arange(self.border.shape[0]), size=min(self.border.shape[0], self.unit_pos.shape[0]), replace=False)]
+            self.targets = assign_by_ot(self.unit_pos, selected_border)
 
         moves = list(zip(self.unit_ids.tolist(), get_moves(self.unit_pos, self.targets)))
         self._debug(f'{len(moves)} moves: {moves}')
@@ -740,6 +744,14 @@ class SpecialForce(RoleTemplate):
 
         self.team_size = team_size
         self.actual_size = 0
+        self.tolerance = tolerance
+
+        self._initialize_params()
+
+        self.formation = self.__create_formation()
+
+    def _initialize_params(self):
+        self.actual_size = 0
 
         self.enemy = None
         self.unit_pos_next_step = []
@@ -747,12 +759,8 @@ class SpecialForce(RoleTemplate):
         self.unit_idx = []
         self.unit_pos = []
 
-        self.in_formation = False
-        self.formation = self.__create_formation()
-
         self.attacking = False
         self.died_while_attacking = 0
-        self.tolerance = tolerance
 
     def select(self):
         self._debug("SpecialForce.select")
@@ -912,7 +920,8 @@ class SpecialForce(RoleTemplate):
         return list(zip(self.unit_ids, get_moves(self.unit_pos, self.unit_pos_next_step[0:len(self.unit_pos)])))
 
     def release(self):
-        pass
+        self.resource_pool.release_units(self.name, self.unit_ids)
+        self._initialize_params()
 
 
 # -----------------------------------------------------------------------------
@@ -960,14 +969,14 @@ class Player:
         self.target_loc = []
 
         self.initial_radius = 35
-        self.num_scouts = 1
+
+        self.set_hyperparam(spawn_days)
 
         base_angles = get_base_angles(player_idx)
         outer_wall_angles = np.linspace(start=base_angles[0], stop=base_angles[1], num=int(self.initial_radius * 2 / 1.4))
         self.counter = 0
         self.midsorted_outer_wall_angles = midsort(outer_wall_angles)
 
-        self.set_hyperparam(spawn_days)
         self.cb_scheduled = np.array([self.CB_START, self.CB_START + self.CB_DURATION])
 
         # compute special forces metadata
@@ -977,7 +986,6 @@ class Player:
         self.sf_units_per_team = max(self.sf_units // 5, 10)
         self.sf_units_per_team = min(self.sf_units_per_team, self.sf_units)
 
-        self.sf_count = 4
 
         # SAMPLE SQUAD
         '''
@@ -1002,15 +1010,23 @@ class Player:
         self.logger.info(" ".join(str(a) for a in args))
 
     def set_hyperparam(self, spawn_days):
+        self.num_scouts = 3
+
+        self.sf_count = 3
+        self.troops_per_sf = 40 # keep sf-total ratio to be under 8-40
+
         self.CB_START = 35
         self.CB_DURATION = 5 # days dedicated to border consolidation in each cycle
+
         if spawn_days < 5:
             self.COOL_DOWN = 5
         elif spawn_days <= 5:
             self.COOL_DOWN = 8
         elif spawn_days <= 10:
+            self.num_scouts = 1
             self.COOL_DOWN = 10
         else:
+            self.num_scouts = 1
             self.COOL_DOWN = 20
 
 
@@ -1093,12 +1109,7 @@ class Player:
 
             # allocation phase
             self.scout_team.select()
-            
-            for i in range(self.sf_count):
-                if self.special_forces_existing[i] or (len(self.resource_pool.get_free_units()) >= 30 and (self.day_n > 35 + (i * 30))):
-                    self.special_forces_existing[i] = 1
-                    self.special_forces[i].select()
-                    
+            self.allocate_sf()  
             if self.day_n == self.cb_scheduled[0]:
                 self.macro_army.select()
             self.default_soldiers.select()
@@ -1122,10 +1133,7 @@ class Player:
 
             # allocation phase
             self.scout_team.select()
-            for i in range(self.sf_count):
-                if self.special_forces_existing[i] or (len(self.resource_pool.get_free_units()) >= 30 and (self.day_n > 35 + (i * 30))):
-                    self.special_forces_existing[i] = 1
-                    self.special_forces[i].select()
+            self.allocate_sf()
             self.default_soldiers.select()
 
             # mobilization phase
@@ -1146,6 +1154,20 @@ class Player:
         self.debug(f'Sorted moves (#: {len(sorted_moves)}): {sorted_moves}')
         self.debug(f'resource pool: {self.resource_pool.team_to_unit_dict}')
         return sorted_moves
+
+    def allocate_sf(self):
+        for i in range(self.sf_count):
+            num_free = len(self.resource_pool.get_free_units())
+            affordable = (self.our_units.shape[0] > i * self.troops_per_sf) # we want ratio of sepcial force to total to be at most 8-30
+            if self.special_forces_existing[i] == 1:
+                if affordable:
+                    self.special_forces[i].select()
+                else:
+                    self.special_forces_existing[i] == 0
+                    self.special_forces[i].release()
+            elif num_free >= 30 and affordable:
+                self.special_forces_existing[i] = 1
+                self.special_forces[i].select()
 
     def integrate_moves(self, all_moves: List[Umove]) -> List[Move]:
         return [m for _, m in sorted(all_moves, key=lambda x:x[0])]
@@ -1312,7 +1334,7 @@ def assign_by_ot(unit_pos, target_loc):
     Returns reordered target_loc optimally mapped to each unit - shape (N, 2)
     """
     a, b = np.ones((unit_pos.shape[0],)) / unit_pos.shape[0] , np.ones((target_loc.shape[0],)) / target_loc.shape[0]  # uniform weights on points
-    M = ot.dist(unit_pos, target_loc, metric='euclidean') # cost matrix
+    M = ot.dist(unit_pos, target_loc, metric='sqeuclidean') # cost matrix
     assignment = ot.emd(a, b, M).argmax(axis=1) # OT linear program solver
     return target_loc[assignment]
 
